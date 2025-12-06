@@ -8,6 +8,7 @@ from program.media.state import States
 from program.media.stream import Stream
 from program.media.media_entry import MediaEntry
 from program.media.models import MediaMetadata
+from program.settings.manager import settings_manager
 from program.services.downloaders.models import (
     DebridFile,
     DownloadedTorrent,
@@ -82,15 +83,65 @@ class Downloader:
             return
 
         try:
-            download_success = False
-            # Sort streams by resolution and rank (highest first) using simple, fast sorting
-            sorted_streams = _sort_streams_by_quality(item.streams)
+            ranking_settings = settings_manager.settings.ranking
+            library_path_setting = (
+                settings_manager.settings.updaters.library_path
+                or settings_manager.settings.filesystem.mount_path
+            )
+            library_path = str(library_path_setting) if library_path_setting else None
+            profile_name = ranking_settings.get_profile_name_for_path(library_path)
+            keep_versions = ranking_settings.get_keep_versions_for_profile(profile_name)
+            keep_versions = keep_versions if keep_versions and keep_versions > 0 else 1
 
             # Track if we hit circuit breaker on any service
             hit_circuit_breaker = False
             tried_streams = 0
 
+            # Sort streams by resolution and rank (highest first) using simple, fast sorting
+            sorted_streams = _sort_streams_by_quality(item.streams)
+
+            # Determine desired top-N streams for retention
+            desired_hashes: list[str] = []
+            desired_streams: list[Stream] = []
             for stream in sorted_streams:
+                ih = stream.infohash.lower()
+                if ih in desired_hashes:
+                    continue
+                desired_hashes.append(ih)
+                desired_streams.append(stream)
+                if len(desired_hashes) >= keep_versions:
+                    break
+
+            existing_infohashes = {
+                getattr(entry, "infohash", "").lower()
+                for entry in getattr(item, "filesystem_entries", [])
+                if getattr(entry, "infohash", None)
+            }
+
+            # Ensure retention is enforced even if no new downloads occur (e.g., keep_versions decreased)
+            self._enforce_version_retention(item, keep_versions, desired_hashes)
+            existing_infohashes = {
+                getattr(entry, "infohash", "").lower()
+                for entry in getattr(item, "filesystem_entries", [])
+                if getattr(entry, "infohash", None)
+            }
+
+            streams_to_process = [
+                stream
+                for stream in desired_streams
+                if stream.infohash.lower() not in existing_infohashes
+            ]
+
+            download_success = False
+            new_downloads = 0
+
+            if not streams_to_process and len(existing_infohashes) >= keep_versions:
+                download_success = True
+
+            for stream in streams_to_process:
+                if len(existing_infohashes) + new_downloads >= keep_versions:
+                    break
+
                 # Try each available service for this stream before blacklisting
                 stream_failed_on_all_services = True
                 stream_hit_circuit_breaker = False
@@ -115,13 +166,21 @@ class Downloader:
                         download_result = self.download_cached_stream_on_service(
                             stream, container, service
                         )
-                        if self.update_item_attributes(item, download_result, service):
+                        if self.update_item_attributes(
+                            item,
+                            download_result,
+                            service,
+                            keep_versions=keep_versions,
+                            profile_name=profile_name,
+                        ):
                             logger.log(
                                 "DEBRID",
                                 f"Downloaded {item.log_string} from '{stream.raw_title}' [{stream.infohash}] using {service.key}",
                             )
                             download_success = True
                             stream_failed_on_all_services = False
+                            existing_infohashes.add(stream.infohash.lower())
+                            new_downloads += 1
                             break
                         else:
                             raise NoMatchingFilesException(
@@ -162,10 +221,6 @@ class Downloader:
                                 )
                         continue
 
-                # If stream succeeded on any service, we're done
-                if download_success:
-                    break
-
                 # Only blacklist if stream genuinely failed on ALL available services
                 # Don't blacklist if we hit circuit breaker in single-provider mode
                 if stream_failed_on_all_services:
@@ -185,6 +240,9 @@ class Downloader:
                 tried_streams += 1
                 if tried_streams >= 3:
                     yield item
+
+            # Final retention check after processing downloads
+            self._enforce_version_retention(item, keep_versions, desired_hashes)
 
         except Exception as e:
             logger.error(
@@ -211,6 +269,59 @@ class Downloader:
             self._service_cooldowns.clear()
 
         yield item
+
+    def _enforce_version_retention(
+        self,
+        item: MediaItem,
+        keep_versions: int,
+        desired_hashes: Optional[list[str]] = None,
+    ) -> None:
+        """Ensure only the top N filesystem entries are retained for the item."""
+        keep_versions = keep_versions if keep_versions and keep_versions > 0 else 1
+        entries = list(getattr(item, "filesystem_entries", []))
+        if not entries:
+            return
+
+        entry_by_hash = {
+            getattr(entry, "infohash", "").lower(): entry for entry in entries
+        }
+
+        if desired_hashes:
+            ordered_hashes = [h.lower() for h in desired_hashes]
+        else:
+            ordered_hashes = []
+            for stream in _sort_streams_by_quality(item.streams):
+                ih = stream.infohash.lower()
+                if ih not in ordered_hashes:
+                    ordered_hashes.append(ih)
+
+        keep_list: list[MediaEntry] = []
+        for ih in ordered_hashes:
+            if ih in entry_by_hash and entry_by_hash[ih] not in keep_list:
+                keep_list.append(entry_by_hash[ih])
+            if len(keep_list) >= keep_versions:
+                break
+
+        # Fill remaining slots with any entries (e.g., legacy without infohash)
+        if len(keep_list) < keep_versions:
+            for entry in entries:
+                if entry not in keep_list:
+                    keep_list.append(entry)
+                if len(keep_list) >= keep_versions:
+                    break
+
+        # Reorder/trim to keep list only
+        item.filesystem_entries.clear()
+        item.filesystem_entries.extend(keep_list)
+
+        # Keep active_stream aligned with best retained entry when possible
+        if keep_list:
+            top_infohash = getattr(keep_list[0], "infohash", None)
+            if top_infohash:
+                item.active_stream = {
+                    "infohash": top_infohash,
+                    "id": item.active_stream.get("id") if item.active_stream else None,
+                }
 
     def validate_stream(
         self, stream: Stream, item: MediaItem
@@ -261,7 +372,12 @@ class Downloader:
         return None
 
     def update_item_attributes(
-        self, item: MediaItem, download_result: DownloadedTorrent, service=None
+        self,
+        item: MediaItem,
+        download_result: DownloadedTorrent,
+        service=None,
+        keep_versions: int = 1,
+        profile_name: str | None = None,
     ) -> bool:
         """Update the item attributes with the downloaded files and active stream."""
         if service is None:
@@ -319,6 +435,8 @@ class Downloader:
                     episode_cap,
                     processed_episode_ids,
                     service,
+                    keep_versions,
+                    profile_name,
                 ):
                     found = True
 
@@ -337,6 +455,8 @@ class Downloader:
         episode_cap: int = None,
         processed_episode_ids: Optional[set[str]] = None,
         service=None,
+        keep_versions: int = 1,
+        profile_name: str | None = None,
     ) -> bool:
         """
         Determine whether a parsed file corresponds to the given media item (movie, show, season, or episode) and update the item's attributes when matches are found.
@@ -366,7 +486,15 @@ class Downloader:
 
         if item.type == "movie" and file_data.type == "movie":
             logger.debug("match_file_to_item: movie match -> updating attributes")
-            self._update_attributes(item, file, download_result, service, file_data)
+            self._update_attributes(
+                item,
+                file,
+                download_result,
+                service,
+                file_data,
+                keep_versions,
+                profile_name,
+            )
             return True
 
         if item.type in ("show", "season", "episode"):
@@ -387,12 +515,6 @@ class Downloader:
                     )
                     continue
 
-                if episode.filesystem_entry:
-                    logger.debug(
-                        f"Episode {episode.log_string} already has filesystem_entry; skipping"
-                    )
-                    continue
-
                 if episode and episode.state not in [
                     States.Completed,
                     States.Symlinked,
@@ -408,7 +530,13 @@ class Downloader:
                         f"match_file_to_item: updating episode {episode.id} from file '{file.filename}'"
                     )
                     self._update_attributes(
-                        episode, file, download_result, service, file_data
+                        episode,
+                        file,
+                        download_result,
+                        service,
+                        file_data,
+                        keep_versions,
+                        profile_name,
                     )
                     if processed_episode_ids is not None:
                         processed_episode_ids.add(str(episode.id))
@@ -471,6 +599,8 @@ class Downloader:
         download_result: DownloadedTorrent,
         service=None,
         file_data: ParsedData = None,
+        keep_versions: int = 1,
+        profile_name: str | None = None,
     ) -> None:
         """
         Update the media item's active stream and filesystem entries using a debrid file from a completed download.
@@ -519,14 +649,39 @@ class Downloader:
                 provider_download_id=str(download_result.info.id),
                 file_size=debrid_file.filesize or 0,
                 media_metadata=media_metadata,
+                infohash=download_result.infohash.lower(),
             )
 
             # Populate library profiles
             entry.library_profiles = library_profiles
 
-            # Clear existing entries and add the new one
-            item.filesystem_entries.clear()
-            item.filesystem_entries.append(entry)
+            # If an entry with the same infohash exists, update it in place
+            existing_entry = next(
+                (
+                    e
+                    for e in item.filesystem_entries
+                    if getattr(e, "infohash", "").lower()
+                    == download_result.infohash.lower()
+                ),
+                None,
+            )
+
+            if existing_entry:
+                existing_entry.original_filename = entry.original_filename
+                existing_entry.download_url = entry.download_url
+                existing_entry.unrestricted_url = entry.unrestricted_url
+                existing_entry.provider = entry.provider
+                existing_entry.provider_download_id = entry.provider_download_id
+                existing_entry.file_size = entry.file_size
+                existing_entry.media_metadata = entry.media_metadata
+                existing_entry.library_profiles = entry.library_profiles
+                existing_entry.infohash = entry.infohash
+                entry = existing_entry
+            else:
+                item.filesystem_entries.append(entry)
+
+            # Enforce retention after adding/updating
+            self._enforce_version_retention(item, keep_versions)
 
             logger.debug(
                 f"Created MediaEntry for {item.log_string} with original_filename={debrid_file.filename}"

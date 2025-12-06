@@ -132,8 +132,17 @@ class Scraping:
             logger.log("NOT_FOUND", f"No streams to process for {item.log_string}")
             return {}
 
+        library_path_setting = (
+            settings_manager.settings.updaters.library_path
+            or settings_manager.settings.filesystem.mount_path
+        )
+        library_path = str(library_path_setting) if library_path_setting else None
+
         sorted_streams: Dict[str, Stream] = _parse_results(
-            item, results, verbose_logging
+            item,
+            results,
+            verbose_logging,
+            library_path,
         )
         if sorted_streams and (verbose_logging and settings_manager.settings.log_level):
             top_results: List[Stream] = list(sorted_streams.values())[:10]

@@ -522,24 +522,27 @@ class RivenVFS(pyfuse3.Operations):
         """
         from program.media.media_entry import MediaEntry
 
-        # Only process if this item has a filesystem entry
-        if not item.filesystem_entry:
-            logger.debug(f"Item {item.id} has no filesystem_entry, skipping VFS add")
+        # Only process if this item has filesystem entries
+        entries = [
+            fe for fe in item.filesystem_entries if isinstance(fe, MediaEntry)
+        ] if getattr(item, "filesystem_entries", None) else []
+
+        if not entries:
+            logger.debug(
+                f"Item {item.id} has no media filesystem_entries, skipping VFS add"
+            )
             return False
 
-        entry = item.filesystem_entry
-        if not isinstance(entry, MediaEntry):
-            logger.debug(f"Item {item.id} filesystem_entry is not a MediaEntry")
-            return False
+        video_paths: list[str] = []
 
-        # Register the MediaEntry (video file)
-        video_paths = self._register_filesystem_entry(entry)
-
-        if not video_paths:
-            return False
-
-        # Mark as available in VFS
-        entry.available_in_vfs = True
+        # Register all MediaEntries (video files)
+        for entry in entries:
+            registered = self._register_filesystem_entry(entry)
+            if registered:
+                entry.available_in_vfs = True
+                video_paths.extend(registered)
+            else:
+                entry.available_in_vfs = False
 
         # Register all subtitles for this video
         for subtitle in item.subtitles:
@@ -572,24 +575,23 @@ class RivenVFS(pyfuse3.Operations):
             for episode in item.episodes:
                 self.remove(episode)
 
-        # Only process if this item has a filesystem entry
-        if not item.filesystem_entry:
-            logger.debug(f"Item {item.id} has no filesystem_entry, skipping VFS remove")
-            return False
+        # Only process if this item has filesystem entries
+        entries = [
+            fe for fe in item.filesystem_entries if isinstance(fe, MediaEntry)
+        ] if getattr(item, "filesystem_entries", None) else []
 
-        entry = item.filesystem_entry
-
-        if not isinstance(entry, MediaEntry):
-            logger.debug(f"Item {item.id} filesystem_entry is not a MediaEntry")
+        if not entries:
+            logger.debug(
+                f"Item {item.id} has no media filesystem_entries, skipping VFS remove"
+            )
             return False
 
         logger.debug(f"Removing VFS nodes for item {item.id}")
 
-        # Unregister the MediaEntry (video file)
-        video_paths = self._unregister_filesystem_entry(entry)
-
-        # Mark as not available in VFS
-        entry.available_in_vfs = False
+        video_paths: list[str] = []
+        for entry in entries:
+            video_paths.extend(self._unregister_filesystem_entry(entry))
+            entry.available_in_vfs = False
 
         # Unregister all subtitles for this video
         for subtitle in item.subtitles:

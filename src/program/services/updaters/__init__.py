@@ -61,18 +61,20 @@ class Updater:
 
         for _item in items:
             # Get all VFS paths from the entry's helper method
-            fe = getattr(_item, "filesystem_entry", None)
-            if not fe:
+            entries = getattr(_item, "filesystem_entries", None) or []
+            if not entries:
                 logger.debug(
                     f"No filesystem entry for {_item.log_string}; skipping updater"
                 )
                 continue
 
-            try:
-                all_vfs_paths = fe.get_all_vfs_paths()
-            except Exception as e:
-                logger.error(f"Failed to get VFS paths for {_item.log_string}: {e}")
-                continue
+            all_vfs_paths: list[str] = []
+            for fe in entries:
+                try:
+                    all_vfs_paths.extend(fe.get_all_vfs_paths())
+                except Exception as e:
+                    logger.error(f"Failed to get VFS paths for {_item.log_string}: {e}")
+                    continue
 
             if not all_vfs_paths:
                 logger.debug(f"No VFS paths for {_item.log_string}; skipping updater")
@@ -80,7 +82,7 @@ class Updater:
 
             logger.debug(f"Updating {_item.log_string} at {len(all_vfs_paths)} path(s)")
 
-            for vfs_path in all_vfs_paths:
+            for vfs_path in dict.fromkeys(all_vfs_paths):
                 # Build absolute path to the file
                 abs_path = os.path.join(self.library_path, vfs_path.lstrip("/"))
                 refresh_path = os.path.dirname(abs_path)

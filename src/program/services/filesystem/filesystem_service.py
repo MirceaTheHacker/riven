@@ -76,6 +76,8 @@ class FilesystemService:
 
         # Process each episode/movie
         for episode_or_movie in items_to_process:
+            # Remove existing nodes to keep VFS in sync with current entries/retention
+            self.riven_vfs.remove(episode_or_movie)
             success = self.riven_vfs.add(episode_or_movie)
 
             if not success:

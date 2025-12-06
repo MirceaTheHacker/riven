@@ -32,6 +32,9 @@ class MediaEntry(FilesystemEntry):
     provider_download_id: Mapped[str | None] = mapped_column(
         sqlalchemy.String, nullable=True
     )
+    infohash: Mapped[str | None] = mapped_column(
+        sqlalchemy.String, nullable=True, index=True
+    )
 
     # Library Profile References (list of profile keys from settings.json)
     library_profiles: Mapped[list[str] | None] = mapped_column(
@@ -134,6 +137,7 @@ class MediaEntry(FilesystemEntry):
         provider_download_id: str,
         file_size: int = 0,
         media_metadata: Optional[dict] = None,
+        infohash: Optional[str] = None,
     ) -> "MediaEntry":
         """
         Create a MediaEntry representing a virtual (RivenVFS) media file.
@@ -156,6 +160,7 @@ class MediaEntry(FilesystemEntry):
             provider_download_id=provider_download_id,
             file_size=file_size,
             media_metadata=media_metadata,
+            infohash=infohash.lower() if infohash else None,
         )
 
     def to_dict(self) -> dict:
@@ -184,18 +189,19 @@ class MediaEntry(FilesystemEntry):
             }
         """
         base_dict = super().to_dict()
-        base_dict.update(
-            {
-                "file_size": self.file_size,
-                "is_directory": self.is_directory,
-                "original_filename": self.original_filename,
-                "download_url": self.download_url,
-                "unrestricted_url": self.unrestricted_url,
-                "provider": self.provider,
-                "provider_download_id": self.provider_download_id,
-            }
-        )
-        return base_dict
+            base_dict.update(
+                {
+                    "file_size": self.file_size,
+                    "is_directory": self.is_directory,
+                    "original_filename": self.original_filename,
+                    "download_url": self.download_url,
+                    "unrestricted_url": self.unrestricted_url,
+                    "provider": self.provider,
+                    "provider_download_id": self.provider_download_id,
+                    "infohash": self.infohash,
+                }
+            )
+            return base_dict
 
 
 # ============================================================================

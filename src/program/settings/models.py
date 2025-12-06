@@ -1,7 +1,7 @@
 """Riven settings models"""
 
 from pathlib import Path
-from typing import Any, Callable, List, Literal, Annotated
+from typing import Any, Callable, Dict, List, Literal, Annotated, Optional
 
 from pydantic import (
     BaseModel,
@@ -837,6 +837,124 @@ class ScraperModel(Observable):
 class RTNSettingsModel(SettingsModel, Observable): ...
 
 
+class RankingProfileSettings(RTNSettingsModel):
+    """Ranking profile configuration (extends RTN settings)."""
+
+    keep_versions_per_item: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Optional override for how many versions to keep for this profile. Falls back to global value when unset.",
+    )
+
+
+class PathProfileMapping(BaseModel):
+    """Mapping from library path prefix to ranking profile name."""
+
+    path: str = Field(description="Library path prefix to match (longest-prefix wins)")
+    profile_name: str = Field(description="Name of the ranking profile to apply")
+
+    @field_validator("path")
+    def validate_path(cls, v: str) -> str:
+        if not v:
+            raise ValueError("path cannot be empty")
+        return v
+
+
+class RankingSettings(Observable):
+    """Container for multiple ranking profiles and retention rules."""
+
+    default_profile: str = Field(
+        default="default", description="Profile name to use when no mapping matches"
+    )
+    keep_versions_per_item: int = Field(
+        default=1,
+        ge=1,
+        description="Number of versions to keep per item when no profile override is set",
+    )
+    profiles: Dict[str, RankingProfileSettings] = Field(
+        default_factory=lambda: {"default": RankingProfileSettings()},
+        description="Named ranking profiles",
+    )
+    path_profiles: List[PathProfileMapping] = Field(
+        default_factory=list,
+        description="Path → profile mappings (longest-prefix match)",
+    )
+
+    @model_validator(mode="before")
+    def migrate_legacy(cls, values: dict[str, Any]) -> dict[str, Any]:
+        """
+        Backward compatibility shim:
+        - If no `profiles` key exists, wrap legacy ranking settings into a single `default` profile.
+        """
+        if values is None:
+            return values
+        if "profiles" not in values:
+            legacy = dict(values)
+            keep_versions = legacy.pop("keep_versions_per_item", 1)
+            path_profiles = legacy.pop("path_profiles", [])
+            default_profile = legacy.pop("default_profile", "default")
+            return {
+                "default_profile": default_profile or "default",
+                "keep_versions_per_item": keep_versions or 1,
+                "profiles": {"default": RankingProfileSettings(**legacy)},
+                "path_profiles": path_profiles,
+            }
+        return values
+
+    @model_validator(mode="after")
+    def ensure_default_profile(self):
+        """Ensure default_profile points to a valid profile and clamp keep_versions_per_item."""
+        if not self.profiles:
+            # Create a default profile if none exist
+            self.profiles = {"default": RankingProfileSettings()}
+            self.default_profile = "default"
+
+        if self.default_profile not in self.profiles:
+            # Fall back to the first available profile
+            self.default_profile = next(iter(self.profiles.keys()))
+
+        if not self.keep_versions_per_item or self.keep_versions_per_item < 1:
+            self.keep_versions_per_item = 1
+
+        return self
+
+    def get_profile_name_for_path(self, library_path: str | None) -> str:
+        """Return profile name matching the given library path using longest-prefix match."""
+        if not library_path:
+            return self.default_profile
+
+        matches = [
+            mapping
+            for mapping in self.path_profiles
+            if library_path.startswith(mapping.path)
+        ]
+        if not matches:
+            return self.default_profile
+
+        # Longest prefix wins
+        best_match = max(matches, key=lambda m: len(m.path))
+        return best_match.profile_name if best_match.profile_name in self.profiles else self.default_profile
+
+    def get_profile(self, name: str | None = None) -> RankingProfileSettings:
+        """Return the ranking profile by name, falling back to default."""
+        if name and name in self.profiles:
+            return self.profiles[name]
+        return self.profiles[self.default_profile]
+
+    def get_profile_for_path(self, library_path: str | None) -> RankingProfileSettings:
+        """Resolve profile for a path and return the settings object."""
+        profile_name = self.get_profile_name_for_path(library_path)
+        return self.get_profile(profile_name)
+
+    def get_keep_versions_for_profile(self, profile_name: str | None = None) -> int:
+        """Return keep_versions_per_item applying profile override when present."""
+        if profile_name and profile_name in self.profiles:
+            profile_value = self.profiles[profile_name].keep_versions_per_item
+            if profile_value and profile_value > 0:
+                return profile_value
+        return self.keep_versions_per_item
+
+
 # Application Settings
 
 
@@ -980,8 +1098,8 @@ class AppModel(Observable):
     scraping: ScraperModel = Field(
         default_factory=lambda: ScraperModel(), description="Scraper configuration"
     )
-    ranking: RTNSettingsModel = Field(
-        default_factory=lambda: RTNSettingsModel(),
+    ranking: RankingSettings = Field(
+        default_factory=lambda: RankingSettings(),
         description="Result ranking configuration",
     )
     indexer: IndexerModel = Field(

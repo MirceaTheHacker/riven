@@ -15,31 +15,52 @@ from RTN import (
 from program.media.item import MediaItem
 from program.media.stream import Stream
 from program.settings.manager import settings_manager
-from program.settings.models import RTNSettingsModel, ScraperModel
+from program.settings.models import RankingProfileSettings, RankingSettings, ScraperModel
 
 scraping_settings: ScraperModel = settings_manager.settings.scraping
-ranking_settings: RTNSettingsModel = settings_manager.settings.ranking
 ranking_model: BaseRankingModel = DefaultRanking()
-rtn = RTN(ranking_settings, ranking_model)
+
+
+def _get_ranking_context(
+    library_path: str | None,
+) -> tuple[RankingSettings, RankingProfileSettings, str]:
+    ranking_settings: RankingSettings = settings_manager.settings.ranking
+    profile_name = ranking_settings.get_profile_name_for_path(
+        str(library_path) if library_path else None
+    )
+    profile = ranking_settings.get_profile(profile_name)
+    return ranking_settings, profile, profile_name
 
 
 def _parse_results(
-    item: MediaItem, results: Dict[str, str], log_msg: bool = True
+    item: MediaItem,
+    results: Dict[str, str],
+    log_msg: bool = True,
+    library_path: str | None = None,
 ) -> Dict[str, Stream]:
     """Parse the results from the scrapers into Torrent objects."""
     torrents: Set[Torrent] = set()
     processed_infohashes: Set[str] = set()
     correct_title: str = item.get_top_title()
 
+    ranking_settings, profile_settings, profile_name = _get_ranking_context(
+        library_path
+    )
+    rtn = RTN(profile_settings, ranking_model)
+
     aliases: Dict[str, list[str]] = (
         item.get_aliases() if scraping_settings.enable_aliases else {}
     )
     # we should remove keys from aliases if we are excluding the language
     aliases = {
-        k: v for k, v in aliases.items() if k not in ranking_settings.languages.exclude
+        k: v
+        for k, v in aliases.items()
+        if k not in profile_settings.languages.exclude
     }
 
-    logger.debug(f"Processing {len(results)} results for {item.log_string}")
+    logger.debug(
+        f"Processing {len(results)} results for {item.log_string} using profile '{profile_name}'"
+    )
 
     for infohash, raw_title in results.items():
         if infohash in processed_infohashes:
@@ -50,9 +71,7 @@ def _parse_results(
                 raw_title=raw_title,
                 infohash=infohash,
                 correct_title=correct_title,
-                remove_trash=settings_manager.settings.ranking.options[
-                    "remove_all_trash"
-                ],
+                remove_trash=profile_settings.options["remove_all_trash"],
                 aliases=aliases,
             )
 
@@ -185,9 +204,15 @@ def _parse_results(
     if torrents:
         logger.debug(f"Found {len(torrents)} streams for {item.log_string}")
         torrents = sort_torrents(torrents, bucket_limit=scraping_settings.bucket_limit)
-        torrents_dict = {}
-        for torrent in torrents.values():
-            torrents_dict[torrent.infohash.lower()] = Stream(torrent)
+        torrents_dict = {
+            torrent.infohash.lower(): Stream(torrent) for torrent in torrents.values()
+        }
+
+        keep_versions = ranking_settings.get_keep_versions_for_profile(profile_name)
+        torrents_dict = select_top_n(
+            torrents_dict, keep_versions if keep_versions else 1
+        )
+
         logger.debug(
             f"Kept {len(torrents_dict)} streams for {item.log_string} after processing bucket limit"
         )
@@ -226,3 +251,22 @@ def _get_item_country(item: MediaItem) -> str:
         country = "UK"
 
     return country
+
+
+def select_top_n(
+    streams: Dict[str, Stream], keep_versions: int
+) -> Dict[str, Stream]:
+    """
+    Return a dictionary containing only the top N streams, preserving order.
+
+    Args:
+        streams: Ordered mapping of infohash -> Stream (already ranked)
+        keep_versions: Number of streams to keep (minimum 1)
+
+    Returns:
+        Dict[str, Stream]: Trimmed mapping with at most N entries
+    """
+    if keep_versions <= 0:
+        return {}
+    items = list(streams.items())[:keep_versions]
+    return {k: v for k, v in items}
