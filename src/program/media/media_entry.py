@@ -189,19 +189,19 @@ class MediaEntry(FilesystemEntry):
             }
         """
         base_dict = super().to_dict()
-            base_dict.update(
-                {
-                    "file_size": self.file_size,
-                    "is_directory": self.is_directory,
-                    "original_filename": self.original_filename,
-                    "download_url": self.download_url,
-                    "unrestricted_url": self.unrestricted_url,
-                    "provider": self.provider,
-                    "provider_download_id": self.provider_download_id,
-                    "infohash": self.infohash,
-                }
-            )
-            return base_dict
+        base_dict.update(
+            {
+                "file_size": self.file_size,
+                "is_directory": self.is_directory,
+                "original_filename": self.original_filename,
+                "download_url": self.download_url,
+                "unrestricted_url": self.unrestricted_url,
+                "provider": self.provider,
+                "provider_download_id": self.provider_download_id,
+                "infohash": self.infohash,
+            }
+        )
+        return base_dict
 
 
 # ============================================================================

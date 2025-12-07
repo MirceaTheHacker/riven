@@ -201,10 +201,18 @@ class RivenVFS(pyfuse3.Operations):
         self._opener_stats: dict[str, dict] = {}
 
         # Mount management
-        self._mountpoint = os.path.abspath(mountpoint)
+        normalized_mount = os.path.abspath(mountpoint)
+        # Avoid placeholder paths that are not writable (common in fresh installs)
+        if normalized_mount in ("/path", "/path/to/riven/mount"):
+            normalized_mount = "/tmp/riven"
+            logger.bind(component="RivenVFS").warning(
+                f"mount_path is set to placeholder '{mountpoint}', falling back to {normalized_mount}"
+            )
+        self._mountpoint = normalized_mount
         self._thread = None
         self._unmount_requested: trio_util.AsyncBool = trio_util.AsyncBool(False)
         self.stream_nursery: trio.Nursery
+        self._mounted: bool = False
 
         def _fuse_runner():
             async def _async_main() -> NoReturn:
@@ -247,7 +255,23 @@ class RivenVFS(pyfuse3.Operations):
                 "allow_other",
             }
 
-            pyfuse3.init(self, self._mountpoint, fuse_options)
+            try:
+                pyfuse3.init(self, self._mountpoint, fuse_options)
+            except RuntimeError as e:
+                if "allow_other" in str(e).lower():
+                    logger.bind(component="RivenVFS").warning(
+                        "FUSE mount failed due to allow_other; retrying without it. "
+                        "Set user_allow_other in /etc/fuse.conf to enable."
+                    )
+                    # Rebuild options without allow_other (both str and bytes variants)
+                    cleaned_options = {
+                        opt
+                        for opt in fuse_options
+                        if opt not in {"allow_other", b"allow_other"}
+                    }
+                    pyfuse3.init(self, self._mountpoint, cleaned_options)
+                else:
+                    raise
 
             self._mounted = True
 
@@ -665,6 +689,11 @@ class RivenVFS(pyfuse3.Operations):
         # Ensure mountpoint directory exists (recreate if necessary)
         try:
             os.makedirs(mountpoint, exist_ok=True)
+        except PermissionError as e:
+            raise PermissionError(
+                f"Cannot create mountpoint '{mountpoint}'. Please set filesystem.mount_path "
+                "to a writable location (e.g., /tmp/riven or a directory you own)."
+            ) from e
         except OSError:
             try:
                 os.rmdir(mountpoint)
@@ -1855,6 +1884,13 @@ class RivenVFS(pyfuse3.Operations):
             if request_end < request_start:
                 return b""
 
+            # Short-circuit reads when unmount is in progress to avoid nursery errors
+            if self._unmount_requested.value or not self._mounted:
+                logger.warning(
+                    f"Rejecting read for {path} during shutdown (fh={fh}, off={off}, size={size})"
+                )
+                raise pyfuse3.FUSEError(errno.EIO)
+
             stream = await self._get_stream(
                 path=path,
                 fh=fh,
@@ -1933,6 +1969,17 @@ class RivenVFS(pyfuse3.Operations):
                     )
 
                 raise pyfuse3.FUSEError(errno.EIO) from e
+            except* RuntimeError as e:
+                # Handle non-exception-group errors (e.g., RuntimeError) separately
+                for exc in e.exceptions:
+                    if "Nursery is closed to new arrivals" in str(exc):
+                        logger.warning(
+                            stream._build_log_message(
+                                "Rejecting read: nursery closed during shutdown"
+                            )
+                        )
+                        raise pyfuse3.FUSEError(errno.EIO) from exc
+                raise
             except* Exception as e:
                 for exc in e.exceptions:
                     if stream:

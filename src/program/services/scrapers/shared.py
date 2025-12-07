@@ -19,6 +19,9 @@ from program.settings.models import RankingProfileSettings, RankingSettings, Scr
 
 scraping_settings: ScraperModel = settings_manager.settings.scraping
 ranking_model: BaseRankingModel = DefaultRanking()
+# Backward-compatible default RTN instance for routes that import `rtn` directly
+# Uses the current default ranking profile at module import time.
+rtn: RTN = RTN(settings_manager.settings.ranking.get_profile(), ranking_model)
 
 
 def _get_ranking_context(
