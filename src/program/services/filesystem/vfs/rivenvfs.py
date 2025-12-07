@@ -38,6 +38,7 @@ from http import HTTPStatus
 import httpx
 import pyfuse3
 import trio
+import time
 import os
 import shutil
 import errno
@@ -231,6 +232,20 @@ class RivenVFS(pyfuse3.Operations):
                 except Exception:
                     logger.exception("FUSE main loop error, restarting")
 
+                    # If mount failed during initialization, avoid tight infinite restart loop
+                    if not getattr(self, "_mounted", False):
+                        logger.error("FUSE mount failed during initialization; not retrying.")
+                        break
+
+                    # small backoff before retrying
+                    try:
+                        time.sleep(1)
+                    except Exception:
+                        pass
+                else:
+                    # normal exit from the async main loop
+                    break
+
             logger.trace(f"FUSE main loop exited")
 
         self._thread = threading.Thread(target=_fuse_runner, daemon=True)
@@ -258,7 +273,9 @@ class RivenVFS(pyfuse3.Operations):
             try:
                 pyfuse3.init(self, self._mountpoint, fuse_options)
             except RuntimeError as e:
-                if "allow_other" in str(e).lower():
+                # Handle common FUSE init failures gracefully instead of raising
+                msg = str(e).lower()
+                if "allow_other" in msg:
                     logger.bind(component="RivenVFS").warning(
                         "FUSE mount failed due to allow_other; retrying without it. "
                         "Set user_allow_other in /etc/fuse.conf to enable."
@@ -269,9 +286,18 @@ class RivenVFS(pyfuse3.Operations):
                         for opt in fuse_options
                         if opt not in {"allow_other", b"allow_other"}
                     }
-                    pyfuse3.init(self, self._mountpoint, cleaned_options)
+                    try:
+                        pyfuse3.init(self, self._mountpoint, cleaned_options)
+                    except Exception:
+                        logger.exception(
+                            "FUSE init failed even after removing allow_other; disabling VFS mount"
+                        )
+                        self._mounted = False
+                        return
                 else:
-                    raise
+                    logger.exception("FUSE init failed; disabling VFS mount: %s", e)
+                    self._mounted = False
+                    return
 
             self._mounted = True
 
