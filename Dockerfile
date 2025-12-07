@@ -14,9 +14,8 @@ WORKDIR /app
 
 # Install dependencies with uv (no dev in builder)
 COPY pyproject.toml uv.lock* ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cache/pip \
-    uv venv .venv && uv sync --no-dev --frozen
+RUN uv venv .venv && uv sync --no-dev --frozen
+
 
 # -----------------
 # Final Stage
