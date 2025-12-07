@@ -643,6 +643,12 @@ class Downloader:
                 )
                 media_metadata = metadata.model_dump(mode="json")
 
+            # Tag the profile used for this download so naming can differentiate retained versions
+            if profile_name:
+                if not media_metadata:
+                    media_metadata = {}
+                media_metadata["profile_name"] = profile_name
+
             entry = MediaEntry.create_virtual_entry(
                 original_filename=debrid_file.filename,
                 download_url=debrid_file.download_url,

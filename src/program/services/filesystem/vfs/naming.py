@@ -120,7 +120,9 @@ class NamingService:
         folder_path = self._create_folder_structure(item, base_path)
 
         # Generate clean filename
-        filename = self._generate_clean_filename(item, parsed)
+        filename = self._generate_clean_filename(
+            item, parsed_metadata=parsed, media_metadata=media_metadata
+        )
 
         # Combine into full path
         full_path = f"{folder_path}/{filename}.{extension}"
@@ -284,7 +286,10 @@ class NamingService:
         return folder
 
     def _generate_clean_filename(
-        self, item: MediaItem, parsed: Optional[dict] = None
+        self,
+        item: MediaItem,
+        parsed_metadata: Optional[dict] = None,
+        media_metadata: Optional[dict] = None,
     ) -> str:
         """
         Generate clean filename from item metadata.
@@ -301,14 +306,18 @@ class NamingService:
             Episode: "Show - s01e01"
         """
         if isinstance(item, Movie):
-            return self._generate_movie_filename(item)
+            return self._generate_movie_filename(item, media_metadata)
         elif isinstance(item, Episode):
-            return self._generate_episode_filename(item, parsed)
+            return self._generate_episode_filename(
+                item, parsed_metadata, media_metadata
+            )
         else:
             # Fallback
             return self._sanitize_name(item.title or "Unknown")
 
-    def _generate_movie_filename(self, item: Movie) -> str:
+    def _generate_movie_filename(
+        self, item: Movie, media_metadata: Optional[dict] = None
+    ) -> str:
         """
         Generate clean filename for movie using template from settings.
 
@@ -327,7 +336,7 @@ class NamingService:
         }
 
         # Add media metadata from MediaEntry if available
-        context.update(self._extract_media_metadata(item))
+        context.update(self._extract_media_metadata(media_metadata))
 
         # Get template from settings
         template = settings_manager.settings.filesystem.movie_file_template
@@ -343,7 +352,10 @@ class NamingService:
             return self._sanitize_name(context["title"])
 
     def _generate_episode_filename(
-        self, item: Episode, parsed: Optional[dict] = None
+        self,
+        item: Episode,
+        parsed: Optional[dict] = None,
+        media_metadata: Optional[dict] = None,
     ) -> str:
         """
         Generate clean filename for episode using template from settings.
@@ -396,7 +408,7 @@ class NamingService:
         }
 
         # Add media metadata from MediaEntry if available
-        context.update(self._extract_media_metadata(item))
+        context.update(self._extract_media_metadata(media_metadata))
 
         # Get template from settings
         template = settings_manager.settings.filesystem.episode_file_template
@@ -467,7 +479,7 @@ class NamingService:
 
         return adapted
 
-    def _extract_media_metadata(self, item: MediaItem) -> dict:
+    def _extract_media_metadata(self, media_metadata: Optional[dict]) -> dict:
         """
         Extract media metadata from MediaEntry for use in templates.
 
@@ -476,16 +488,6 @@ class NamingService:
         """
         metadata = {}
 
-        # Get MediaEntry from item
-        media_entry = None
-        if hasattr(item, "filesystem_entries") and item.filesystem_entries:
-            # Get first MediaEntry (there should only be one for movies/episodes)
-            media_entry = item.filesystem_entries[0]
-
-        if not media_entry or not hasattr(media_entry, "media_metadata"):
-            return metadata
-
-        media_metadata = getattr(media_entry, "media_metadata", {})
         if not media_metadata:
             return metadata
 
@@ -542,6 +544,9 @@ class NamingService:
         if media_metadata.get("is_directors_cut", False):
             edition_parts.append("Director's Cut")
         metadata["edition"] = " ".join(edition_parts)
+
+        # Profile tag injected during download (used to differentiate retained versions)
+        metadata["profile_name"] = media_metadata.get("profile_name", "")
 
         return metadata
 
