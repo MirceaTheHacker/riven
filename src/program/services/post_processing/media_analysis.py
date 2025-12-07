@@ -147,9 +147,12 @@ class MediaAnalysisService:
                 ffprobe_dict = ffprobe_metadata.model_dump(mode="json")
 
                 # Get or create MediaMetadata
-                if item.filesystem_entry.media_metadata:
+                existing_meta = item.filesystem_entry.media_metadata or {}
+                profile_tag = existing_meta.get("profile_name")
+
+                if existing_meta:
                     # Update existing metadata with probed data
-                    metadata = MediaMetadata(**item.filesystem_entry.media_metadata)
+                    metadata = MediaMetadata(**existing_meta)
                     metadata.update_from_probed_data(ffprobe_dict)
                 else:
                     # Create new metadata from probed data only
@@ -163,7 +166,11 @@ class MediaAnalysisService:
                     metadata.update_from_probed_data(ffprobe_dict)
 
                 # Store updated metadata
-                item.filesystem_entry.media_metadata = metadata.model_dump(mode="json")
+                new_meta = metadata.model_dump(mode="json")
+                if profile_tag:
+                    new_meta["profile_name"] = profile_tag
+
+                item.filesystem_entry.media_metadata = new_meta
                 logger.debug(f"ffprobe analysis successful for {item.log_string}")
                 return True
 

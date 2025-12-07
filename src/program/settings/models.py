@@ -935,6 +935,37 @@ class RankingSettings(Observable):
         best_match = max(matches, key=lambda m: len(m.path))
         return best_match.profile_name if best_match.profile_name in self.profiles else self.default_profile
 
+    def get_profile_names_for_path(self, library_path: str | None) -> list[str]:
+        """
+        Return all profile names matching the given library path.
+
+        If multiple mappings share the same longest prefix length, return all of them
+        (enabling multiple profiles to be applied to the same path). Falls back to
+        default_profile when no mappings match.
+        """
+        if not library_path:
+            return [self.default_profile]
+
+        matches = [
+            mapping
+            for mapping in self.path_profiles
+            if library_path.startswith(mapping.path)
+            and mapping.profile_name in self.profiles
+        ]
+        if not matches:
+            return [self.default_profile]
+
+        max_len = max(len(m.path) for m in matches)
+        tied = [m.profile_name for m in matches if len(m.path) == max_len]
+        # Preserve insertion order and deduplicate
+        seen = set()
+        result: list[str] = []
+        for name in tied:
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+        return result
+
     def get_profile(self, name: str | None = None) -> RankingProfileSettings:
         """Return the ranking profile by name, falling back to default."""
         if name and name in self.profiles:

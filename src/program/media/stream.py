@@ -55,6 +55,9 @@ class Stream(db.Model):
     rank: Mapped[int] = mapped_column(sqlalchemy.Integer, nullable=False)
     lev_ratio: Mapped[float] = mapped_column(sqlalchemy.Float, nullable=False)
     resolution: Mapped[Optional[str]] = mapped_column(sqlalchemy.String, nullable=True)
+    profile_name: Mapped[Optional[str]] = mapped_column(
+        sqlalchemy.String, nullable=True
+    )
 
     parents: Mapped[list["MediaItem"]] = relationship(
         secondary="StreamRelation", back_populates="streams", lazy="selectin"
@@ -73,7 +76,7 @@ class Stream(db.Model):
         Index("ix_stream_resolution", "resolution"),
     )
 
-    def __init__(self, torrent: Torrent):
+    def __init__(self, torrent: Torrent, profile_name: str | None = None):
         self.raw_title = torrent.raw_title
         self.infohash = torrent.infohash
         self.parsed_title = torrent.data.parsed_title
@@ -83,6 +86,7 @@ class Stream(db.Model):
         self.resolution = (
             torrent.data.resolution.lower() if torrent.data.resolution else "unknown"
         )
+        self.profile_name = profile_name
 
     def __hash__(self):
         return self.infohash
@@ -100,4 +104,5 @@ class Stream(db.Model):
             "rank": self.rank,
             "lev_ratio": self.lev_ratio,
             "resolution": self.resolution,
+            "profile_name": self.profile_name,
         }

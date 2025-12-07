@@ -89,21 +89,23 @@ class Downloader:
                 or settings_manager.settings.filesystem.mount_path
             )
             library_path = str(library_path_setting) if library_path_setting else None
-            profile_name = ranking_settings.get_profile_name_for_path(library_path)
-            keep_versions = ranking_settings.get_keep_versions_for_profile(profile_name)
-            keep_versions = keep_versions if keep_versions and keep_versions > 0 else 1
+            default_profile_name = ranking_settings.get_profile_name_for_path(
+                library_path
+            )
+            keep_versions = ranking_settings.get_keep_versions_for_profile(
+                default_profile_name
+            )
+            # Ensure we attempt to keep at least as many streams as we currently have (multi-profile case)
+            keep_versions = max(keep_versions or 1, len(item.streams) or 1)
 
             # Track if we hit circuit breaker on any service
             hit_circuit_breaker = False
             tried_streams = 0
 
-            # Sort streams by resolution and rank (highest first) using simple, fast sorting
-            sorted_streams = _sort_streams_by_quality(item.streams)
-
-            # Determine desired top-N streams for retention
+            # Preserve scrape order and ensure we collect up to keep_versions distinct infohashes
             desired_hashes: list[str] = []
             desired_streams: list[Stream] = []
-            for stream in sorted_streams:
+            for stream in item.streams:
                 ih = stream.infohash.lower()
                 if ih in desired_hashes:
                     continue
@@ -167,12 +169,15 @@ class Downloader:
                         download_result = self.download_cached_stream_on_service(
                             stream, container, service
                         )
+                        stream_profile = getattr(
+                            stream, "profile_name", default_profile_name
+                        )
                         if self.update_item_attributes(
                             item,
                             download_result,
                             service,
                             keep_versions=keep_versions,
-                            profile_name=profile_name,
+                            profile_name=stream_profile,
                         ):
                             logger.log(
                                 "DEBRID",
