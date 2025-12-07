@@ -139,7 +139,8 @@ class Downloader:
                 download_success = True
 
             for stream in streams_to_process:
-                if len(existing_infohashes) + new_downloads >= keep_versions:
+                # Stop once we have keep_versions worth of distinct infohashes
+                if len(existing_infohashes) >= keep_versions:
                     break
 
                 # Try each available service for this stream before blacklisting
