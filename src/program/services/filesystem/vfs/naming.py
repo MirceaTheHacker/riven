@@ -546,7 +546,9 @@ class NamingService:
         metadata["edition"] = " ".join(edition_parts)
 
         # Profile tag injected during download (used to differentiate retained versions)
-        metadata["profile_name"] = media_metadata.get("profile_name", "")
+        profile_name = media_metadata.get("profile_name", "")
+        metadata["profile_name"] = profile_name
+        metadata["profile_tag"] = f"[{profile_name}]" if profile_name else ""
 
         return metadata
 
