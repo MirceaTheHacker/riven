@@ -14,6 +14,7 @@ from program.services.content import (
     Overseerr,
     PlexWatchlist,
     TraktContent,
+    Watchlist2PlexContent,
 )
 from program.services.downloaders import Downloader
 from program.services.indexers import IndexerService
@@ -70,6 +71,7 @@ class Program(threading.Thread):
             Listrr: Listrr(),
             Mdblist: Mdblist(),
             TraktContent: TraktContent(),
+            Watchlist2PlexContent: Watchlist2PlexContent(),
         }
 
         # Instantiate services fresh on each settings change; settings_manager observers handle reinit
