@@ -136,7 +136,7 @@ class PlexAPI:
         return rss_items
 
     def get_items_from_watchlist(self) -> list[dict[str, Optional[str]]]:
-        """Fetch media from Plex watchlist"""
+        """Fetch media from Plex watchlist with ids + basic metadata"""
         items = self.account.watchlist()
         watchlist_items: list[dict[str, str]] = []
         for item in items:
@@ -146,7 +146,7 @@ class PlexAPI:
                 tvdb_id = None
 
                 if hasattr(item, "guids") and item.guids:
-                    imdb_id: str = next(
+                    imdb_id = next(
                         (
                             guid.id.split("//")[-1]
                             for guid in item.guids
@@ -155,7 +155,7 @@ class PlexAPI:
                         "",
                     )
                     if item.TYPE == "movie":
-                        tmdb_id: str = next(
+                        tmdb_id = next(
                             (
                                 guid.id.split("//")[-1]
                                 for guid in item.guids
@@ -164,7 +164,7 @@ class PlexAPI:
                             "",
                         )
                     elif item.TYPE == "show":
-                        tvdb_id: str = next(
+                        tvdb_id = next(
                             (
                                 guid.id.split("//")[-1]
                                 for guid in item.guids
@@ -173,21 +173,23 @@ class PlexAPI:
                             "",
                         )
 
-                    if not any([imdb_id, tmdb_id, tvdb_id]):
-                        logger.log(
-                            "NOT_FOUND",
-                            f"Unable to extract IMDb ID from {item.title} ({item.year}) with data id: {imdb_id}",
-                        )
-                        continue
+                wl_entry = {
+                    "imdb_id": imdb_id or "",
+                    "tmdb_id": tmdb_id or "",
+                    "tvdb_id": tvdb_id or "",
+                    "title": getattr(item, "title", None),
+                    "year": getattr(item, "year", None),
+                    "type": getattr(item, "TYPE", "movie"),
+                }
 
-                    watchlist_items.append(
-                        {"imdb_id": imdb_id, "tmdb_id": tmdb_id, "tvdb_id": tvdb_id}
-                    )
-                else:
+                if not any([wl_entry["imdb_id"], wl_entry["tmdb_id"], wl_entry["tvdb_id"]]):
                     logger.log(
                         "NOT_FOUND",
-                        f"{item.title} ({item.year}) is missing guids attribute from Plex",
+                        f"Unable to extract ids from {item.title} ({item.year})",
                     )
+                    continue
+
+                watchlist_items.append(wl_entry)
             except Exception as e:
                 logger.error(
                     f"An unexpected error occurred while fetching Plex watchlist item {item.title}: {e}"

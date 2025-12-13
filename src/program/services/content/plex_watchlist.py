@@ -2,6 +2,7 @@
 
 from typing import Generator
 
+import httpx
 from kink import di
 from loguru import logger
 from requests import HTTPError
@@ -18,6 +19,7 @@ class PlexWatchlist:
     def __init__(self):
         self.key = "plex_watchlist"
         self.settings = settings_manager.settings.content.plex_watchlist
+        self.w2p_settings = settings_manager.settings.content.watchlist2plex
         self.api = None
         self.initialized = self.validate()
         if not self.initialized:
@@ -61,6 +63,64 @@ class PlexWatchlist:
                     return False
         return True
 
+    def _build_w2p_payload(self, watchlist_items: list[dict[str, str]]) -> list[dict]:
+        payload = []
+        for d in watchlist_items:
+            title = d.get("title")
+            item_type = d.get("type") or "movie"
+            identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or title
+            if not title or not identifier:
+                continue
+            payload.append(
+                {
+                    "id": identifier,
+                    "title": title,
+                    "year": d.get("year"),
+                    "type": "movie" if item_type == "movie" else "show",
+                    "season": None,
+                    "episode": None,
+                }
+            )
+        return payload
+
+    def _call_w2p(self, items_payload: list[dict]) -> dict[str, dict]:
+        if not self.w2p_settings.enabled:
+            return {}
+        if not items_payload:
+            return {}
+
+        headers = {}
+        if self.w2p_settings.auth_header_name and self.w2p_settings.auth_header_value:
+            headers[self.w2p_settings.auth_header_name] = self.w2p_settings.auth_header_value
+
+        params = {
+            "force": str(self.w2p_settings.force).lower(),
+            "limit": self.w2p_settings.limit,
+        }
+
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.post(
+                    self.w2p_settings.url,
+                    json={"items": items_payload},
+                    headers=headers,
+                    params=params,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as e:
+            logger.error(f"Failed calling Watchlist2Plex harvest endpoint: {e}")
+            return {}
+
+        releases_map: dict[str, dict] = {}
+        for entry in data.get("items", []):
+            item = entry.get("item", {})
+            ident = item.get("id") or item.get("title")
+            if not ident:
+                continue
+            releases_map[str(ident)] = entry
+        return releases_map
+
     def run(self) -> Generator[MediaItem, None, None]:
         """Fetch new media from `Plex Watchlist` and RSS feed if enabled."""
         try:
@@ -74,16 +134,29 @@ class PlexWatchlist:
 
         items_to_yield: list[MediaItem] = []
 
+        # Harvest releases via W2P for watchlist items
+        w2p_payload = self._build_w2p_payload(watchlist_items)
+        w2p_results = self._call_w2p(w2p_payload)
+
         if watchlist_items:
             for d in watchlist_items:
-                if d["tvdb_id"] and not d["tmdb_id"]:  # show
-                    items_to_yield.append(
-                        MediaItem({"tvdb_id": d["tvdb_id"], "requested_by": self.key})
-                    )
-                elif d["tmdb_id"] and not d["tvdb_id"]:  # movie
-                    items_to_yield.append(
-                        MediaItem({"tmdb_id": d["tmdb_id"], "requested_by": self.key})
-                    )
+                ident = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id")
+                w2p_entry = w2p_results.get(str(ident)) if ident else None
+                releases = (w2p_entry or {}).get("releases") or []
+                if not releases:
+                    logger.debug(f"Skipping {d.get('title')} - no W2P releases")
+                    continue
+
+                if d.get("tvdb_id") and not d.get("tmdb_id"):
+                    item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
+                elif d.get("tmdb_id"):
+                    item_data = {"tmdb_id": d["tmdb_id"], "requested_by": self.key}
+                else:
+                    # fallback to imdb-only
+                    item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
+
+                item_data["aliases"] = {"w2p_releases": releases}
+                items_to_yield.append(MediaItem(item_data))
 
         if rss_items:
             for r in rss_items:
