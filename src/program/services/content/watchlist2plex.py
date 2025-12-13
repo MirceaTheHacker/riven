@@ -36,7 +36,9 @@ class Watchlist2PlexContent:
             "force": str(self.settings.force).lower(),
             "limit": self.settings.limit,
         }
-        with httpx.Client(timeout=30.0) as client:
+        # W2P can take a while to harvest items (browser automation + DMM),
+        # so allow a generous timeout.
+        with httpx.Client(timeout=120.0) as client:
             resp = client.post(self.settings.url, params=params, headers=self._headers())
             resp.raise_for_status()
             return resp.json()
