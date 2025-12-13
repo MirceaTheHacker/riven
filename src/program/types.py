@@ -9,6 +9,7 @@ from program.services.content import (
     Overseerr,
     PlexWatchlist,
     TraktContent,
+    Watchlist2PlexContent,
 )
 from program.services.downloaders import (
     RealDebridDownloader,
@@ -19,7 +20,7 @@ from program.services.filesystem import FilesystemService
 
 # Typehint classes
 Scraper = Union[Scraping]
-Content = Union[Overseerr, PlexWatchlist, Listrr, Mdblist, TraktContent]
+Content = Union[Overseerr, PlexWatchlist, Listrr, Mdblist, TraktContent, Watchlist2PlexContent]
 Downloader = Union[RealDebridDownloader,]
 
 Service = Union[Content, Scraper, Downloader, FilesystemService, Updater]

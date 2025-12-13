@@ -638,6 +638,34 @@ class TraktModel(Updatable):
     )
 
 
+class Watchlist2PlexModel(Updatable):
+    enabled: bool = Field(default=False, description="Enable Watchlist2Plex integration")
+    url: EmptyOrUrl = Field(
+        default="http://localhost:8080/riven/watchlist",
+        description="Watchlist2Plex harvest endpoint",
+    )
+    auth_header_name: str = Field(
+        default="", description="Optional auth header name for W2P"
+    )
+    auth_header_value: str = Field(
+        default="", description="Optional auth header value for W2P"
+    )
+    force: bool = Field(
+        default=False,
+        description="Force W2P to process full watchlist instead of only new items",
+    )
+    limit: int = Field(
+        default=10,
+        ge=-1,
+        description="Max items per W2P harvest call (-1 for no limit)",
+    )
+    update_interval: int = Field(
+        default=900,
+        ge=1,
+        description="Update interval in seconds for W2P polling",
+    )
+
+
 class ContentModel(Observable):
     overseerr: OverseerrModel = Field(
         default_factory=lambda: OverseerrModel(), description="Overseerr configuration"
@@ -654,6 +682,10 @@ class ContentModel(Observable):
     )
     trakt: TraktModel = Field(
         default_factory=lambda: TraktModel(), description="Trakt configuration"
+    )
+    watchlist2plex: "Watchlist2PlexModel" = Field(
+        default_factory=lambda: Watchlist2PlexModel(),
+        description="Watchlist2Plex (W2P) integration configuration",
     )
 
 

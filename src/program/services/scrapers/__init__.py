@@ -19,6 +19,7 @@ from program.services.scrapers.prowlarr import Prowlarr
 from program.services.scrapers.rarbg import Rarbg
 from program.services.scrapers.torrentio import Torrentio
 from program.services.scrapers.zilean import Zilean
+from program.services.scrapers.watchlist2plex import Watchlist2PlexScraper
 
 
 class Scraping:
@@ -30,6 +31,7 @@ class Scraping:
             settings_manager.settings.scraping.max_failed_attempts
         )
         self.services = [
+            Watchlist2PlexScraper(),
             Comet(),
             Jackett(),
             Mediafusion(),
