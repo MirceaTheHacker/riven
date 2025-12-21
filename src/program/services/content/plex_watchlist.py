@@ -140,18 +140,39 @@ class PlexWatchlist:
         items_to_yield: list[MediaItem] = []
 
         # Harvest releases via W2P for watchlist items
-        w2p_payload = self._build_w2p_payload(watchlist_items)
-        w2p_results = self._call_w2p(w2p_payload)
-
         if watchlist_items:
+            logger.info(f"Calling W2P to harvest {len(watchlist_items)} watchlist items")
+            w2p_payload = self._build_w2p_payload(watchlist_items)
+            logger.debug(f"W2P payload built: {len(w2p_payload)} items")
+            w2p_results = self._call_w2p(w2p_payload)
+            logger.info(f"W2P returned {len(w2p_results)} results")
+
+            # Build a mapping of identifier -> watchlist item for easier lookup
+            ident_to_watchlist_item = {}
             for d in watchlist_items:
-                ident = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id")
-                w2p_entry = w2p_results.get(str(ident)) if ident else None
-                releases = (w2p_entry or {}).get("releases") or []
+                # Use the same identifier logic as _build_w2p_payload
+                identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or d.get("title")
+                if identifier:
+                    ident_to_watchlist_item[str(identifier)] = d
+
+            # Process W2P results and match them back to watchlist items
+            matched_count = 0
+            for w2p_entry in w2p_results.values():
+                w2p_item = w2p_entry.get("item", {})
+                w2p_id = w2p_item.get("id") or w2p_item.get("title")
+                releases = w2p_entry.get("releases") or []
+                
                 if not releases:
-                    logger.debug(f"Skipping {d.get('title')} - no W2P releases")
+                    logger.debug(f"Skipping {w2p_item.get('title')} - no W2P releases")
+                    continue
+                
+                # Find the matching watchlist item
+                d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
+                if not d:
+                    logger.warning(f"Could not match W2P result {w2p_id} ({w2p_item.get('title')}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
                     continue
 
+                # Build item data using the watchlist item's IDs
                 if d.get("tvdb_id") and not d.get("tmdb_id"):
                     item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
                 elif d.get("tmdb_id"):
@@ -162,6 +183,11 @@ class PlexWatchlist:
 
                 item_data["aliases"] = {"w2p_releases": releases}
                 items_to_yield.append(MediaItem(item_data))
+                matched_count += 1
+                logger.info(f"Matched {d.get('title')} with {len(releases)} releases from W2P")
+            
+            if matched_count == 0 and w2p_results:
+                logger.warning(f"W2P returned {len(w2p_results)} results but none matched watchlist items. This may indicate an ID mismatch issue.")
 
         if rss_items:
             for r in rss_items:
