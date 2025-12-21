@@ -93,23 +93,28 @@ class PlexWatchlist:
         if self.w2p_settings.auth_header_name and self.w2p_settings.auth_header_value:
             headers[self.w2p_settings.auth_header_name] = self.w2p_settings.auth_header_value
 
-        params = {
-            "force": str(self.w2p_settings.force).lower(),
-            "limit": self.w2p_settings.limit,
-        }
+        # Use /riven/harvest-item endpoint which accepts items in JSON body
+        # The default URL might be /riven/watchlist, so we need to construct the correct endpoint
+        base_url = self.w2p_settings.url.rstrip("/")
+        if base_url.endswith("/watchlist"):
+            harvest_url = base_url.replace("/watchlist", "/harvest-item")
+        elif not base_url.endswith("/harvest-item"):
+            harvest_url = f"{base_url}/harvest-item"
+        else:
+            harvest_url = base_url
 
         try:
-            with httpx.Client(timeout=60.0) as client:
+            with httpx.Client(timeout=120.0) as client:  # Increased timeout for browser automation
                 resp = client.post(
-                    self.w2p_settings.url,
+                    harvest_url,
                     json={"items": items_payload},
                     headers=headers,
-                    params=params,
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                logger.debug(f"W2P harvest returned {len(data.get('items', []))} items")
         except Exception as e:
-            logger.error(f"Failed calling Watchlist2Plex harvest endpoint: {e}")
+            logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}")
             return {}
 
         releases_map: dict[str, dict] = {}

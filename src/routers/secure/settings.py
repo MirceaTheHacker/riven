@@ -59,12 +59,14 @@ async def save_settings() -> MessageResponse:
         raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
 
 
-@router.get("/get/all", operation_id="get_all_settings", response_model=dict)
-async def get_all_settings() -> dict[str, Any]:
+@router.get("/get/all", operation_id="get_all_settings")
+async def get_all_settings() -> AppModel:
     try:
-        # Return as dict to avoid Observable serialization issues with FastAPI
-        # The Observable base class's __setattr__ can interfere with Pydantic serialization
-        return settings_manager.settings.model_dump()
+        # Create a new instance to avoid Observable serialization issues
+        # FastAPI will serialize this properly using Pydantic's model_dump_json
+        settings_dict = settings_manager.settings.model_dump()
+        new_settings = AppModel.model_validate(settings_dict)
+        return new_settings
     except Exception as e:
         logger.exception(f"Error getting all settings: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
