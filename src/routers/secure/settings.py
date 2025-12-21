@@ -1,8 +1,8 @@
-from copy import copy
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ValidationError
+from loguru import logger
 
 from program.settings.manager import settings_manager
 from program.settings.models import AppModel
@@ -27,45 +27,68 @@ async def get_settings_schema() -> dict[str, Any]:
     """
     Get the JSON schema for the settings.
     """
-    return settings_manager.settings.model_json_schema()
+    try:
+        # Use the class method for getting schema in Pydantic v2
+        return settings_manager.settings.__class__.model_json_schema()
+    except Exception as e:
+        logger.exception(f"Error getting settings schema: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings schema: {str(e)}")
 
 
 @router.get("/load", operation_id="load_settings")
 async def load_settings() -> MessageResponse:
-    settings_manager.load()
-    return {
-        "message": "Settings loaded!",
-    }
+    try:
+        settings_manager.load()
+        return {
+            "message": "Settings loaded!",
+        }
+    except Exception as e:
+        logger.exception(f"Error loading settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load settings: {str(e)}")
 
 
 @router.post("/save", operation_id="save_settings")
 async def save_settings() -> MessageResponse:
-    settings_manager.save()
-    return {
-        "message": "Settings saved!",
-    }
+    try:
+        settings_manager.save()
+        return {
+            "message": "Settings saved!",
+        }
+    except Exception as e:
+        logger.exception(f"Error saving settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {str(e)}")
 
 
-@router.get("/get/all", operation_id="get_all_settings")
-async def get_all_settings() -> AppModel:
-    return copy(settings_manager.settings)
+@router.get("/get/all", operation_id="get_all_settings", response_model=dict)
+async def get_all_settings() -> dict[str, Any]:
+    try:
+        # Return as dict to avoid Observable serialization issues with FastAPI
+        # The Observable base class's __setattr__ can interfere with Pydantic serialization
+        return settings_manager.settings.model_dump()
+    except Exception as e:
+        logger.exception(f"Error getting all settings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
 
 
 @router.get("/get/{paths}", operation_id="get_settings")
 async def get_settings(paths: str) -> dict[str, Any]:
-    current_settings = settings_manager.settings.model_dump()
-    data = {}
-    for path in paths.split(","):
-        keys = path.split(".")
-        current_obj = current_settings
+    try:
+        current_settings = settings_manager.settings.model_dump()
+        data = {}
+        for path in paths.split(","):
+            keys = path.split(".")
+            current_obj = current_settings
 
-        for k in keys:
-            if k not in current_obj:
-                continue
-            current_obj = current_obj[k]
+            for k in keys:
+                if k not in current_obj:
+                    continue
+                current_obj = current_obj[k]
 
-        data[path] = current_obj
-    return data
+            data[path] = current_obj
+        return data
+    except Exception as e:
+        logger.exception(f"Error getting settings for paths {paths}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
 
 
 @router.post("/set/all", operation_id="set_all_settings")
@@ -126,9 +149,9 @@ async def set_settings(settings: List[SetSettings]) -> MessageResponse:
         settings_manager.load(settings_dict=updated_settings.model_dump())
         settings_manager.save()  # Ensure the changes are persisted
     except ValidationError as e:
-        raise HTTPException from e(
+        raise HTTPException(
             status_code=400,
             detail=f"Failed to update settings: {str(e)}",
-        )
+        ) from e
 
     return {"message": "Settings updated successfully."}
