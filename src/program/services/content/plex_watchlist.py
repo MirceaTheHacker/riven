@@ -120,9 +120,12 @@ class PlexWatchlist:
         releases_map: dict[str, dict] = {}
         for entry in data.get("items", []):
             item = entry.get("item", {})
+            releases = entry.get("releases", [])
             ident = item.get("id") or item.get("title")
             if not ident:
+                logger.warning(f"W2P result missing identifier: {entry}")
                 continue
+            logger.debug(f"W2P result for {ident}: {len(releases)} releases, item: {item.get('title', 'unknown')}")
             releases_map[str(ident)] = entry
         return releases_map
 
@@ -157,19 +160,25 @@ class PlexWatchlist:
 
             # Process W2P results and match them back to watchlist items
             matched_count = 0
+            skipped_no_releases = 0
+            skipped_no_match = 0
+            
             for w2p_entry in w2p_results.values():
                 w2p_item = w2p_entry.get("item", {})
                 w2p_id = w2p_item.get("id") or w2p_item.get("title")
+                w2p_title = w2p_item.get("title", "unknown")
                 releases = w2p_entry.get("releases") or []
                 
                 if not releases:
-                    logger.debug(f"Skipping {w2p_item.get('title')} - no W2P releases")
+                    skipped_no_releases += 1
+                    logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM")
                     continue
                 
                 # Find the matching watchlist item
                 d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
                 if not d:
-                    logger.warning(f"Could not match W2P result {w2p_id} ({w2p_item.get('title')}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
+                    skipped_no_match += 1
+                    logger.warning(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
                     continue
 
                 # Build item data using the watchlist item's IDs
@@ -186,8 +195,12 @@ class PlexWatchlist:
                 matched_count += 1
                 logger.info(f"Matched {d.get('title')} with {len(releases)} releases from W2P")
             
-            if matched_count == 0 and w2p_results:
-                logger.warning(f"W2P returned {len(w2p_results)} results but none matched watchlist items. This may indicate an ID mismatch issue.")
+            logger.info(f"W2P processing summary: {matched_count} matched, {skipped_no_releases} skipped (no releases), {skipped_no_match} skipped (no match)")
+            if matched_count == 0:
+                if w2p_results:
+                    logger.warning(f"W2P returned {len(w2p_results)} results but none were usable. {skipped_no_releases} had no releases, {skipped_no_match} couldn't be matched.")
+                else:
+                    logger.warning(f"W2P returned no results for {len(watchlist_items)} watchlist items. Check W2P logs to see if items were found in DMM.")
 
         if rss_items:
             for r in rss_items:
