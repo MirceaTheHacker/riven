@@ -19,7 +19,19 @@ class PlexWatchlist:
     def __init__(self):
         self.key = "plex_watchlist"
         self.settings = settings_manager.settings.content.plex_watchlist
-        self.w2p_settings = settings_manager.settings.content.watchlist2plex
+        # Handle case where watchlist2plex might not exist in older settings
+        try:
+            self.w2p_settings = getattr(settings_manager.settings.content, 'watchlist2plex', None)
+            if self.w2p_settings is None:
+                # Fallback: create a minimal config if watchlist2plex doesn't exist
+                from program.settings.models import Watchlist2PlexModel
+                self.w2p_settings = Watchlist2PlexModel()
+                logger.warning("watchlist2plex settings not found in ContentModel, using defaults")
+        except Exception as e:
+            # Fallback: create a minimal config if anything goes wrong
+            from program.settings.models import Watchlist2PlexModel
+            self.w2p_settings = Watchlist2PlexModel()
+            logger.warning(f"Error accessing watchlist2plex settings: {e}, using defaults")
         self.api = None
         self.initialized = self.validate()
         if not self.initialized:
