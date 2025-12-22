@@ -123,7 +123,15 @@ class Server(uvicorn.Server):
 
 
 def signal_handler(signum, frame):
-    logger.log("PROGRAM", "Exiting Gracefully.")
+    # Map common signals to their names
+    signal_names = {
+        signal.SIGINT: "SIGINT",
+        signal.SIGTERM: "SIGTERM",
+        signal.SIGHUP: "SIGHUP",
+        signal.SIGQUIT: "SIGQUIT",
+    }
+    signal_name = signal_names.get(signum, f"Signal {signum}")
+    logger.log("PROGRAM", f"Exiting Gracefully. Received signal: {signal_name} ({signum})")
     app.program.stop()
     sys.exit(0)
 
