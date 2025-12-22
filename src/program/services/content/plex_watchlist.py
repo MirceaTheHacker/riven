@@ -20,18 +20,20 @@ class PlexWatchlist:
         self.key = "plex_watchlist"
         self.settings = settings_manager.settings.content.plex_watchlist
         # Handle case where watchlist2plex might not exist in older settings
-        try:
-            self.w2p_settings = getattr(settings_manager.settings.content, 'watchlist2plex', None)
-            if self.w2p_settings is None:
-                # Fallback: create a minimal config if watchlist2plex doesn't exist
-                from program.settings.models import Watchlist2PlexModel
-                self.w2p_settings = Watchlist2PlexModel()
-                logger.warning("watchlist2plex settings not found in ContentModel, using defaults")
-        except Exception as e:
-            # Fallback: create a minimal config if anything goes wrong
-            from program.settings.models import Watchlist2PlexModel
-            self.w2p_settings = Watchlist2PlexModel()
-            logger.warning(f"Error accessing watchlist2plex settings: {e}, using defaults")
+        self.w2p_settings = getattr(settings_manager.settings.content, 'watchlist2plex', None)
+        if self.w2p_settings is None:
+            # Fallback: create a minimal config object if watchlist2plex doesn't exist
+            # Use a simple object with the attributes we need instead of importing
+            class MinimalW2PSettings:
+                enabled = False
+                url = "http://localhost:8080/riven/harvest-item"
+                auth_header_name = ""
+                auth_header_value = ""
+                force = False
+                limit = -1
+                update_interval = 900
+            self.w2p_settings = MinimalW2PSettings()
+            logger.warning("watchlist2plex settings not found in ContentModel, using minimal defaults")
         self.api = None
         self.initialized = self.validate()
         if not self.initialized:
@@ -77,11 +79,12 @@ class PlexWatchlist:
 
     def _build_w2p_payload(self, watchlist_items: list[dict[str, str]]) -> list[dict]:
         payload = []
-        for d in watchlist_items:
+        for idx, d in enumerate(watchlist_items):
             title = d.get("title")
             item_type = d.get("type") or "movie"
             identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or title
             if not title or not identifier:
+                logger.warning(f"Skipping watchlist item #{idx} in payload - missing title or identifier. Item keys: {list(d.keys())}, Item: {d}")
                 continue
             payload.append(
                 {
@@ -93,21 +96,26 @@ class PlexWatchlist:
                     "episode": None,
                 }
             )
+        if not payload and watchlist_items:
+            logger.error(f"Failed to build W2P payload from {len(watchlist_items)} items. First item structure: {watchlist_items[0] if watchlist_items else 'N/A'}")
         return payload
 
     def _call_w2p(self, items_payload: list[dict]) -> dict[str, dict]:
-        if not self.w2p_settings.enabled:
+        if not self.w2p_settings or not getattr(self.w2p_settings, 'enabled', False):
             return {}
         if not items_payload:
             return {}
 
         headers = {}
-        if self.w2p_settings.auth_header_name and self.w2p_settings.auth_header_value:
-            headers[self.w2p_settings.auth_header_name] = self.w2p_settings.auth_header_value
+        auth_name = getattr(self.w2p_settings, 'auth_header_name', '') or ''
+        auth_value = getattr(self.w2p_settings, 'auth_header_value', '') or ''
+        if auth_name and auth_value:
+            headers[auth_name] = auth_value
 
         # Use /riven/harvest-item endpoint which accepts items in JSON body
         # The default URL might be /riven/watchlist, so we need to construct the correct endpoint
-        base_url = self.w2p_settings.url.rstrip("/")
+        w2p_url = getattr(self.w2p_settings, 'url', 'http://localhost:8080/riven/harvest-item') or 'http://localhost:8080/riven/harvest-item'
+        base_url = w2p_url.rstrip("/")
         if base_url.endswith("/watchlist"):
             harvest_url = base_url.replace("/watchlist", "/harvest-item")
         elif not base_url.endswith("/harvest-item"):
@@ -207,6 +215,8 @@ class PlexWatchlist:
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
+                # Log item structure for debugging
+                logger.debug(f"Item to harvest structure: keys={list(item.keys())}, title={item.get('title')}, imdb={item.get('imdb_id')}, tmdb={item.get('tmdb_id')}, tvdb={item.get('tvdb_id')}")
                 items_to_harvest.append(item)
             
             if not items_to_harvest:
