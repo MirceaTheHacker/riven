@@ -8,7 +8,7 @@ from loguru import logger
 from requests import HTTPError
 
 from program.apis.plex_api import PlexAPI
-from program.db.db_functions import item_exists_by_any_id
+from program.db.db_functions import get_item_by_external_id, item_exists_by_any_id
 from program.media.item import MediaItem
 from program.settings.manager import settings_manager
 
@@ -144,63 +144,94 @@ class PlexWatchlist:
 
         # Harvest releases via W2P for watchlist items
         if watchlist_items:
-            logger.info(f"Calling W2P to harvest {len(watchlist_items)} watchlist items")
-            w2p_payload = self._build_w2p_payload(watchlist_items)
-            logger.debug(f"W2P payload built: {len(w2p_payload)} items")
-            w2p_results = self._call_w2p(w2p_payload)
-            logger.info(f"W2P returned {len(w2p_results)} results")
-
-            # Build a mapping of identifier -> watchlist item for easier lookup
-            ident_to_watchlist_item = {}
-            for d in watchlist_items:
-                # Use the same identifier logic as _build_w2p_payload
-                identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or d.get("title")
-                if identifier:
-                    ident_to_watchlist_item[str(identifier)] = d
-
-            # Process W2P results and match them back to watchlist items
-            matched_count = 0
-            skipped_no_releases = 0
-            skipped_no_match = 0
-            
-            for w2p_entry in w2p_results.values():
-                w2p_item = w2p_entry.get("item", {})
-                w2p_id = w2p_item.get("id") or w2p_item.get("title")
-                w2p_title = w2p_item.get("title", "unknown")
-                releases = w2p_entry.get("releases") or []
+            # Filter out items that already have W2P releases stored to avoid reprocessing
+            # This allows existing items without W2P releases to be processed (for better quality)
+            # but skips items that already have releases stored
+            items_to_harvest = []
+            for item in watchlist_items:
+                # Check if item exists in database and has W2P releases
+                existing_item = None
+                if item.get("imdb_id"):
+                    existing_item = get_item_by_external_id(imdb_id=item["imdb_id"])
+                if not existing_item and item.get("tmdb_id"):
+                    existing_item = get_item_by_external_id(tmdb_id=item["tmdb_id"])
+                if not existing_item and item.get("tvdb_id"):
+                    existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
                 
-                if not releases:
-                    skipped_no_releases += 1
-                    logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM")
-                    continue
+                if existing_item:
+                    # Check if item already has W2P releases stored
+                    aliases = getattr(existing_item, "aliases", {}) or {}
+                    w2p_releases = aliases.get("w2p_releases") or []
+                    if w2p_releases:
+                        logger.debug(f"Skipping {item.get('title', 'unknown')} - already has {len(w2p_releases)} W2P releases stored")
+                        continue
+                    else:
+                        logger.debug(f"Including {item.get('title', 'unknown')} - exists in database but has no W2P releases (will check for better quality)")
                 
-                # Find the matching watchlist item
-                d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
-                if not d:
-                    skipped_no_match += 1
-                    logger.warning(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
-                    continue
-
-                # Build item data using the watchlist item's IDs
-                if d.get("tvdb_id") and not d.get("tmdb_id"):
-                    item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
-                elif d.get("tmdb_id"):
-                    item_data = {"tmdb_id": d["tmdb_id"], "requested_by": self.key}
-                else:
-                    # fallback to imdb-only
-                    item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
-
-                item_data["aliases"] = {"w2p_releases": releases}
-                items_to_yield.append(MediaItem(item_data))
-                matched_count += 1
-                logger.info(f"Matched {d.get('title')} with {len(releases)} releases from W2P")
+                items_to_harvest.append(item)
             
-            logger.info(f"W2P processing summary: {matched_count} matched, {skipped_no_releases} skipped (no releases), {skipped_no_match} skipped (no match)")
-            if matched_count == 0:
-                if w2p_results:
-                    logger.warning(f"W2P returned {len(w2p_results)} results but none were usable. {skipped_no_releases} had no releases, {skipped_no_match} couldn't be matched.")
-                else:
-                    logger.warning(f"W2P returned no results for {len(watchlist_items)} watchlist items. Check W2P logs to see if items were found in DMM.")
+            if not items_to_harvest:
+                logger.info(f"All {len(watchlist_items)} watchlist items already have W2P releases stored, skipping W2P call")
+                w2p_results = {}
+            else:
+                skipped_count = len(watchlist_items) - len(items_to_harvest)
+                logger.info(f"Calling W2P to harvest {len(items_to_harvest)} items (skipped {skipped_count} items that already have W2P releases)")
+                w2p_payload = self._build_w2p_payload(items_to_harvest)
+                logger.debug(f"W2P payload built: {len(w2p_payload)} items")
+                w2p_results = self._call_w2p(w2p_payload)
+                logger.info(f"W2P returned {len(w2p_results)} results")
+
+                # Build a mapping of identifier -> watchlist item for easier lookup
+                ident_to_watchlist_item = {}
+                for d in items_to_harvest:
+                    # Use the same identifier logic as _build_w2p_payload
+                    identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or d.get("title")
+                    if identifier:
+                        ident_to_watchlist_item[str(identifier)] = d
+
+                # Process W2P results and match them back to watchlist items
+                matched_count = 0
+                skipped_no_releases = 0
+                skipped_no_match = 0
+                
+                for w2p_entry in w2p_results.values():
+                    w2p_item = w2p_entry.get("item", {})
+                    w2p_id = w2p_item.get("id") or w2p_item.get("title")
+                    w2p_title = w2p_item.get("title", "unknown")
+                    releases = w2p_entry.get("releases") or []
+                    
+                    if not releases:
+                        skipped_no_releases += 1
+                        logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM")
+                        continue
+                    
+                    # Find the matching watchlist item
+                    d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
+                    if not d:
+                        skipped_no_match += 1
+                        logger.warning(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
+                        continue
+
+                    # Build item data using the watchlist item's IDs
+                    if d.get("tvdb_id") and not d.get("tmdb_id"):
+                        item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
+                    elif d.get("tmdb_id"):
+                        item_data = {"tmdb_id": d["tmdb_id"], "requested_by": self.key}
+                    else:
+                        # fallback to imdb-only
+                        item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
+
+                    item_data["aliases"] = {"w2p_releases": releases}
+                    items_to_yield.append(MediaItem(item_data))
+                    matched_count += 1
+                    logger.info(f"Matched {d.get('title')} with {len(releases)} releases from W2P")
+            
+                logger.info(f"W2P processing summary: {matched_count} matched, {skipped_no_releases} skipped (no releases), {skipped_no_match} skipped (no match)")
+                if matched_count == 0:
+                    if w2p_results:
+                        logger.warning(f"W2P returned {len(w2p_results)} results but none were usable. {skipped_no_releases} had no releases, {skipped_no_match} couldn't be matched.")
+                    else:
+                        logger.warning(f"W2P returned no results for {len(items_to_harvest)} watchlist items. Check W2P logs to see if items were found in DMM.")
 
         if rss_items:
             for r in rss_items:
