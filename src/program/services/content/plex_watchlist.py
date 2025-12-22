@@ -112,26 +112,43 @@ class PlexWatchlist:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                logger.debug(f"W2P harvest returned {len(data.get('items', []))} items")
-                logger.debug(f"W2P harvest response structure: status={data.get('status')}, processed_count={data.get('processed_count')}, items_count={len(data.get('items', []))}")
+                logger.info(f"W2P harvest returned {len(data.get('items', []))} items")
+                logger.info(f"W2P harvest response structure: status={data.get('status')}, processed_count={data.get('processed_count')}, items_count={len(data.get('items', []))}")
                 # Log first item structure for debugging
                 if data.get('items'):
                     first_item = data['items'][0]
-                    logger.debug(f"W2P first item structure: keys={list(first_item.keys())}, has_item={('item' in first_item)}, has_releases={('releases' in first_item)}, releases_count={len(first_item.get('releases', []))}")
+                    logger.info(f"W2P first item structure: keys={list(first_item.keys())}, has_item={('item' in first_item)}, has_releases={('releases' in first_item)}, releases_count={len(first_item.get('releases', []))}")
         except Exception as e:
             logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}")
             return {}
 
         releases_map: dict[str, dict] = {}
-        for entry in data.get("items", []):
-            item = entry.get("item", {})
-            releases = entry.get("releases", [])
+        items_list = data.get("items", [])
+        logger.info(f"Processing {len(items_list)} items from W2P response")
+        
+        if not items_list:
+            logger.warning(f"W2P returned empty items list. Full response keys: {list(data.keys())}")
+            return {}
+        
+        for idx, entry in enumerate(items_list):
+            # Handle both direct structure and nested structure
+            if "item" in entry:
+                item = entry.get("item", {})
+                releases = entry.get("releases", [])
+            else:
+                # If entry is the item itself (shouldn't happen but handle it)
+                item = entry
+                releases = entry.get("releases", [])
+            
             ident = item.get("id") or item.get("title")
             if not ident:
-                logger.warning(f"W2P result missing identifier: {entry}")
+                logger.warning(f"W2P result #{idx} missing identifier. Entry keys: {list(entry.keys())}")
                 continue
-            logger.debug(f"W2P result for {ident}: {len(releases)} releases, item: {item.get('title', 'unknown')}")
+            
+            logger.info(f"W2P result for {ident} ({item.get('title', 'unknown')}): {len(releases)} releases")
             releases_map[str(ident)] = entry
+        
+        logger.info(f"Built releases_map with {len(releases_map)} entries")
         return releases_map
 
     def run(self) -> Generator[MediaItem, None, None]:
@@ -182,9 +199,9 @@ class PlexWatchlist:
                 skipped_count = len(watchlist_items) - len(items_to_harvest)
                 logger.info(f"Calling W2P to harvest {len(items_to_harvest)} items (skipped {skipped_count} items that already have W2P releases)")
                 w2p_payload = self._build_w2p_payload(items_to_harvest)
-                logger.debug(f"W2P payload built: {len(w2p_payload)} items")
+                logger.info(f"W2P payload built: {len(w2p_payload)} items: {[p.get('title') for p in w2p_payload]}")
                 w2p_results = self._call_w2p(w2p_payload)
-                logger.info(f"W2P returned {len(w2p_results)} results")
+                logger.info(f"W2P returned {len(w2p_results)} results. Result keys: {list(w2p_results.keys())}")
 
                 # Build a mapping of identifier -> watchlist item for easier lookup
                 ident_to_watchlist_item = {}

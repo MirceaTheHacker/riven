@@ -18,12 +18,17 @@ class Watchlist2PlexContent:
         self.initialized = self.validate()
 
     def validate(self) -> bool:
-        if not self.settings.enabled:
-            return False
-        if not self.settings.url:
-            logger.error("Watchlist2Plex URL is not set.")
-            return False
-        return True
+        # Disable this service - PlexWatchlist handles W2P integration now
+        # This prevents duplicate W2P calls and conflicts
+        logger.debug("Watchlist2PlexContent service is disabled - PlexWatchlist handles W2P integration")
+        return False
+        # Original validation code (kept for reference):
+        # if not self.settings.enabled:
+        #     return False
+        # if not self.settings.url:
+        #     logger.error("Watchlist2Plex URL is not set.")
+        #     return False
+        # return True
 
     def _headers(self) -> dict:
         headers = {}
