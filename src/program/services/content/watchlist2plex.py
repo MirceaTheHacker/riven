@@ -37,16 +37,10 @@ class Watchlist2PlexContent:
         return headers
 
     def _make_request(self) -> dict:
-        params = {
-            "force": str(self.settings.force).lower(),
-            "limit": self.settings.limit,
-        }
-        # W2P can take a while to harvest items (browser automation + DMM),
-        # so allow a generous timeout.
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(self.settings.url, params=params, headers=self._headers())
-            resp.raise_for_status()
-            return resp.json()
+        # DISABLED - This service should not make requests
+        # PlexWatchlist handles W2P integration now
+        logger.warning("Watchlist2PlexContent._make_request() called but service is disabled - returning empty dict")
+        return {"items": []}
 
     def _build_item(self, payload: dict, releases: List[dict]) -> MediaItem:
         base = payload.get("item", payload)

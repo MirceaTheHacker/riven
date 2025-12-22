@@ -227,18 +227,26 @@ class PlexWatchlist:
                     w2p_title = w2p_item.get("title", "unknown")
                     releases = w2p_entry.get("releases") or []
                     
-                    logger.debug(f"Processing W2P result: title={w2p_title}, id={w2p_id}, releases_count={len(releases)}, entry_keys={list(w2p_entry.keys())}")
+                    logger.warning(f"Processing W2P result: title={w2p_title}, id={w2p_id}, releases_count={len(releases)}, entry_keys={list(w2p_entry.keys())}, item_keys={list(w2p_item.keys())}")
                     
                     if not releases:
                         skipped_no_releases += 1
-                        logger.warning(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM. Entry keys: {list(w2p_entry.keys())}, Entry structure: {w2p_entry}")
+                        logger.error(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM. Entry keys: {list(w2p_entry.keys())}, Entry structure: {w2p_entry}")
                         continue
                     
-                    # Find the matching watchlist item
+                    # Find the matching watchlist item - try ID first, then title
                     d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
+                    if not d and w2p_title:
+                        # Fallback: try matching by title
+                        for watchlist_item in items_to_harvest:
+                            if watchlist_item.get("title", "").lower() == w2p_title.lower():
+                                d = watchlist_item
+                                logger.warning(f"Matched W2P result {w2p_title} to watchlist item by title (ID match failed)")
+                                break
+                    
                     if not d:
                         skipped_no_match += 1
-                        logger.warning(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:5]}")
+                        logger.error(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:10]}, Available titles: {[i.get('title') for i in items_to_harvest[:5]]}")
                         continue
 
                     # Build item data using the watchlist item's IDs
