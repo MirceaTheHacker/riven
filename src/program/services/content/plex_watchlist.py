@@ -113,6 +113,11 @@ class PlexWatchlist:
                 resp.raise_for_status()
                 data = resp.json()
                 logger.debug(f"W2P harvest returned {len(data.get('items', []))} items")
+                logger.debug(f"W2P harvest response structure: status={data.get('status')}, processed_count={data.get('processed_count')}, items_count={len(data.get('items', []))}")
+                # Log first item structure for debugging
+                if data.get('items'):
+                    first_item = data['items'][0]
+                    logger.debug(f"W2P first item structure: keys={list(first_item.keys())}, has_item={('item' in first_item)}, has_releases={('releases' in first_item)}, releases_count={len(first_item.get('releases', []))}")
         except Exception as e:
             logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}")
             return {}
@@ -200,9 +205,11 @@ class PlexWatchlist:
                     w2p_title = w2p_item.get("title", "unknown")
                     releases = w2p_entry.get("releases") or []
                     
+                    logger.debug(f"Processing W2P result: title={w2p_title}, id={w2p_id}, releases_count={len(releases)}, entry_keys={list(w2p_entry.keys())}")
+                    
                     if not releases:
                         skipped_no_releases += 1
-                        logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM")
+                        logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM (entry structure: {w2p_entry})")
                         continue
                     
                     # Find the matching watchlist item
