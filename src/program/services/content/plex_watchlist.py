@@ -171,12 +171,11 @@ class PlexWatchlist:
 
         # Harvest releases via W2P for watchlist items
         if watchlist_items:
-            # Filter out items that already have W2P releases stored to avoid reprocessing
-            # This allows existing items without W2P releases to be processed (for better quality)
-            # but skips items that already have releases stored
+            # Always call W2P for watchlist items to get latest releases
+            # This ensures we get the most up-to-date release data from DMM
             items_to_harvest = []
             for item in watchlist_items:
-                # Check if item exists in database and has W2P releases
+                # Check if item exists in database (for logging purposes)
                 existing_item = None
                 if item.get("imdb_id"):
                     existing_item = get_item_by_external_id(imdb_id=item["imdb_id"])
@@ -186,14 +185,15 @@ class PlexWatchlist:
                     existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
                 
                 if existing_item:
-                    # Check if item already has W2P releases stored
+                    # Check if item already has W2P releases stored (for logging)
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
                     if w2p_releases:
-                        logger.debug(f"Skipping {item.get('title', 'unknown')} - already has {len(w2p_releases)} W2P releases stored")
-                        continue
+                        logger.debug(f"Including {item.get('title', 'unknown')} - exists with {len(w2p_releases)} W2P releases, will refresh from W2P")
                     else:
                         logger.debug(f"Including {item.get('title', 'unknown')} - exists in database but has no W2P releases (will check for better quality)")
+                else:
+                    logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
                 items_to_harvest.append(item)
             
