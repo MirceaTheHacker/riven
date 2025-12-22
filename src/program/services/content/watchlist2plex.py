@@ -70,6 +70,11 @@ class Watchlist2PlexContent:
         return Show(data)
 
     def run(self) -> Generator[List[MediaItem], None, None]:
+        # Disabled - PlexWatchlist handles W2P integration now
+        # This prevents duplicate W2P calls and conflicts
+        logger.debug("Watchlist2PlexContent.run() called but service is disabled - returning early")
+        return
+        
         if not self.initialized:
             return
 

@@ -117,7 +117,10 @@ class PlexWatchlist:
                 # Log first item structure for debugging
                 if data.get('items'):
                     first_item = data['items'][0]
-                    logger.info(f"W2P first item structure: keys={list(first_item.keys())}, has_item={('item' in first_item)}, has_releases={('releases' in first_item)}, releases_count={len(first_item.get('releases', []))}")
+                    logger.warning(f"W2P first item structure: keys={list(first_item.keys())}, has_item={('item' in first_item)}, has_releases={('releases' in first_item)}, releases_count={len(first_item.get('releases', []))}")
+                    logger.warning(f"W2P first item full structure: {first_item}")
+                else:
+                    logger.warning(f"W2P returned no items in response. Full response: {data}")
         except Exception as e:
             logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}")
             return {}
@@ -142,10 +145,12 @@ class PlexWatchlist:
             
             ident = item.get("id") or item.get("title")
             if not ident:
-                logger.warning(f"W2P result #{idx} missing identifier. Entry keys: {list(entry.keys())}")
+                logger.warning(f"W2P result #{idx} missing identifier. Entry keys: {list(entry.keys())}, Entry: {entry}")
                 continue
             
-            logger.info(f"W2P result for {ident} ({item.get('title', 'unknown')}): {len(releases)} releases")
+            logger.warning(f"W2P result for {ident} ({item.get('title', 'unknown')}): {len(releases)} releases. Entry keys: {list(entry.keys())}, Item keys: {list(item.keys())}")
+            if releases:
+                logger.warning(f"W2P releases sample (first 2): {releases[:2] if len(releases) > 0 else 'N/A'}")
             releases_map[str(ident)] = entry
         
         logger.info(f"Built releases_map with {len(releases_map)} entries")
@@ -226,7 +231,7 @@ class PlexWatchlist:
                     
                     if not releases:
                         skipped_no_releases += 1
-                        logger.debug(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM (entry structure: {w2p_entry})")
+                        logger.warning(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM. Entry keys: {list(w2p_entry.keys())}, Entry structure: {w2p_entry}")
                         continue
                     
                     # Find the matching watchlist item
