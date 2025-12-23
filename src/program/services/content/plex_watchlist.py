@@ -12,6 +12,7 @@ from program.apis.tmdb_api import TMDBApi
 from program.db.db_functions import get_item_by_external_id, item_exists_by_any_id
 from program.db.db import db
 from program.media.item import MediaItem
+from program.media.state import States
 from program.settings.manager import settings_manager
 
 
@@ -369,11 +370,14 @@ class PlexWatchlist:
                         current_aliases = getattr(existing_item, "aliases", {}) or {}
                         current_aliases["w2p_releases"] = releases
                         existing_item.set("aliases", current_aliases)
+                        # Clear scraped_at and reset state to Indexed to trigger re-scraping with new W2P releases
+                        existing_item.set("scraped_at", None)
+                        existing_item.store_state(States.Indexed)
                         # Save the update
                         with db.Session() as session:
                             session.merge(existing_item)
                             session.commit()
-                        logger.info(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases")
+                        logger.info(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases and reset to Indexed state to trigger re-scraping")
                         # Yield the existing item so it gets re-queued for scraping
                         items_to_yield.append(existing_item)
                     else:
