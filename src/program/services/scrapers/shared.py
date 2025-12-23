@@ -92,6 +92,14 @@ def _parse_results(
                     remove_trash=profile_settings.options["remove_all_trash"],
                     aliases=aliases,
                 )
+                
+                if is_w2p_release:
+                    logger.debug(f"W2P release parsed successfully for {item.log_string}: infohash={infohash[:8]}..., year={torrent.data.year if torrent.data else 'N/A'}, resolution={torrent.data.resolution if torrent.data else 'N/A'}")
+                
+                if not torrent or not torrent.data:
+                    if is_w2p_release:
+                        logger.warning(f"W2P release failed RTN parsing for {item.log_string}: infohash={infohash[:8]}..., title={raw_title[:80]}...")
+                    continue
 
                 if item.type == "movie":
                     # If movie item, disregard torrents with seasons and episodes
@@ -226,10 +234,15 @@ def _parse_results(
                         )
                         continue
 
+                if is_w2p_release:
+                    logger.debug(f"W2P release passed all filters for {item.log_string}: infohash={infohash[:8]}..., adding to torrents set")
+                
                 torrents.add(torrent)
                 processed_infohashes.add(infohash)
             except Exception as e:
-                if log_msg:
+                if is_w2p_release:
+                    logger.warning(f"W2P release failed RTN parsing with exception for {item.log_string}: infohash={infohash[:8]}..., title={raw_title[:80]}..., error={e}")
+                elif log_msg:
                     logger.trace(f"GarbageTorrent: {e}")
                 processed_infohashes.add(infohash)
                 continue
