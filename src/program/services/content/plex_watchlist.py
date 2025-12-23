@@ -366,8 +366,21 @@ class PlexWatchlist:
                         existing_item = get_item_by_external_id(tvdb_id=d["tvdb_id"])
 
                     if existing_item:
-                        # Update existing item with W2P releases
+                        # Check if W2P releases have actually changed
                         current_aliases = getattr(existing_item, "aliases", {}) or {}
+                        existing_w2p_releases = current_aliases.get("w2p_releases") or []
+                        
+                        # Compare releases by creating sets of infohashes
+                        existing_infohashes = {rel.get("infohash", "").lower() for rel in existing_w2p_releases if rel.get("infohash")}
+                        new_infohashes = {rel.get("infohash", "").lower() for rel in releases if rel.get("infohash")}
+                        releases_changed = existing_infohashes != new_infohashes
+                        
+                        # Check if item is already Completed with streams
+                        item_state = existing_item.state
+                        has_streams = hasattr(existing_item, "streams") and len(getattr(existing_item, "streams", [])) > 0
+                        is_completed = item_state == States.Completed
+                        
+                        # Update existing item with W2P releases
                         current_aliases["w2p_releases"] = releases
                         existing_item.set("aliases", current_aliases)
                         
@@ -389,6 +402,7 @@ class PlexWatchlist:
                                         pass
                         
                         # If we found years in releases and there's a clear consensus, update the item
+                        year_corrected = False
                         if years_from_releases:
                             from collections import Counter
                             year_counts = Counter(years_from_releases)
@@ -415,17 +429,38 @@ class PlexWatchlist:
                                     if hasattr(existing_item, "year"):
                                         existing_item.set("year", most_common_year)
                                     logger.info(f"Corrected year for {d.get('title')} from {item_year} to {most_common_year} based on W2P releases ({count}/{len(years_from_releases)} releases agree)")
+                                    year_corrected = True
                         
-                        # Clear scraped_at and reset state to Indexed to trigger re-scraping with new W2P releases
-                        existing_item.set("scraped_at", None)
-                        existing_item.store_state(States.Indexed)
-                        # Save the update
-                        with db.Session() as session:
-                            session.merge(existing_item)
-                            session.commit()
-                        logger.info(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases and reset to Indexed state to trigger re-scraping")
-                        # Yield the existing item so it gets re-queued for scraping
-                        items_to_yield.append(existing_item)
+                        # Only reset to Indexed if:
+                        # 1. W2P releases have changed, OR
+                        # 2. Year was corrected, OR
+                        # 3. Item is not already Completed with streams
+                        should_reset = releases_changed or year_corrected or (not is_completed or not has_streams)
+                        
+                        if should_reset:
+                            # Clear scraped_at and reset state to Indexed to trigger re-scraping with new W2P releases
+                            existing_item.set("scraped_at", None)
+                            existing_item.store_state(States.Indexed)
+                            # Save the update
+                            with db.Session() as session:
+                                session.merge(existing_item)
+                                session.commit()
+                            reason = []
+                            if releases_changed:
+                                reason.append("W2P releases changed")
+                            if year_corrected:
+                                reason.append("year corrected")
+                            if not is_completed or not has_streams:
+                                reason.append("item not completed or has no streams")
+                            logger.info(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases and reset to Indexed state to trigger re-scraping (reason: {', '.join(reason)})")
+                            # Yield the existing item so it gets re-queued for scraping
+                            items_to_yield.append(existing_item)
+                        else:
+                            # Just save the updated releases without resetting state
+                            with db.Session() as session:
+                                session.merge(existing_item)
+                                session.commit()
+                            logger.debug(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases but did not reset state (already completed with streams, no changes)")
                     else:
                         # Build item data for new item using the watchlist item's IDs
                         if d.get("tvdb_id") and not d.get("tmdb_id"):
