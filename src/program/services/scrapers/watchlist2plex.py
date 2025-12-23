@@ -11,7 +11,21 @@ class Watchlist2PlexScraper:
     key = "watchlist2plex"
 
     def __init__(self):
-        self.initialized = settings_manager.settings.content.watchlist2plex.enabled
+        try:
+            w2p_settings = getattr(settings_manager.settings.content, "watchlist2plex", None)
+            if w2p_settings:
+                self.initialized = getattr(w2p_settings, "enabled", False)
+            else:
+                self.initialized = False
+                logger.warning("Watchlist2PlexScraper: watchlist2plex settings not found in ContentModel, scraper disabled")
+        except Exception as e:
+            logger.error(f"Watchlist2PlexScraper: Failed to initialize: {e}")
+            self.initialized = False
+        
+        if self.initialized:
+            logger.info("Watchlist2PlexScraper initialized and enabled")
+        else:
+            logger.debug("Watchlist2PlexScraper initialized but disabled")
 
     def run(self, item: MediaItem) -> Dict[str, str]:
         """Return mapping of infohash -> raw title using W2P releases stored on the item."""
