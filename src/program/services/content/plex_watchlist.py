@@ -10,6 +10,7 @@ from requests import HTTPError
 from program.apis.plex_api import PlexAPI
 from program.apis.tmdb_api import TMDBApi
 from program.db.db_functions import get_item_by_external_id, item_exists_by_any_id
+from program.db.db import db
 from program.media.item import MediaItem
 from program.settings.manager import settings_manager
 
@@ -354,19 +355,42 @@ class PlexWatchlist:
                         logger.error(f"Could not match W2P result {w2p_id} ({w2p_title}) to watchlist item. Available IDs: {list(ident_to_watchlist_item.keys())[:10]}, Available titles: {[i.get('title') for i in items_to_harvest[:5]]}")
                         continue
 
-                    # Build item data using the watchlist item's IDs
-                    if d.get("tvdb_id") and not d.get("tmdb_id"):
-                        item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
-                    elif d.get("tmdb_id"):
-                        item_data = {"tmdb_id": d["tmdb_id"], "requested_by": self.key}
-                    else:
-                        # fallback to imdb-only
-                        item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
+                    # Check if item already exists in database
+                    existing_item = None
+                    if d.get("imdb_id"):
+                        existing_item = get_item_by_external_id(imdb_id=d["imdb_id"])
+                    if not existing_item and d.get("tmdb_id"):
+                        existing_item = get_item_by_external_id(tmdb_id=d["tmdb_id"])
+                    if not existing_item and d.get("tvdb_id"):
+                        existing_item = get_item_by_external_id(tvdb_id=d["tvdb_id"])
 
-                    item_data["aliases"] = {"w2p_releases": releases}
-                    items_to_yield.append(MediaItem(item_data))
+                    if existing_item:
+                        # Update existing item with W2P releases
+                        current_aliases = getattr(existing_item, "aliases", {}) or {}
+                        current_aliases["w2p_releases"] = releases
+                        existing_item.set("aliases", current_aliases)
+                        # Save the update
+                        with db.Session() as session:
+                            session.merge(existing_item)
+                            session.commit()
+                        logger.info(f"Updated existing item {d.get('title')} (ID: {existing_item.id}) with {len(releases)} W2P releases")
+                        # Yield the existing item so it gets re-queued for scraping
+                        items_to_yield.append(existing_item)
+                    else:
+                        # Build item data for new item using the watchlist item's IDs
+                        if d.get("tvdb_id") and not d.get("tmdb_id"):
+                            item_data = {"tvdb_id": d["tvdb_id"], "requested_by": self.key}
+                        elif d.get("tmdb_id"):
+                            item_data = {"tmdb_id": d["tmdb_id"], "requested_by": self.key}
+                        else:
+                            # fallback to imdb-only
+                            item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
+
+                        item_data["aliases"] = {"w2p_releases": releases}
+                        items_to_yield.append(MediaItem(item_data))
+                        logger.info(f"Created new item {d.get('title')} with {len(releases)} releases from W2P")
+                    
                     matched_count += 1
-                    logger.info(f"Matched {d.get('title')} with {len(releases)} releases from W2P")
             
                 logger.info(f"W2P processing summary: {matched_count} matched, {skipped_no_releases} skipped (no releases), {skipped_no_match} skipped (no match)")
                 if matched_count == 0:
@@ -388,13 +412,18 @@ class PlexWatchlist:
                     )
 
         if items_to_yield:
-            items_to_yield = [
-                item
-                for item in items_to_yield
-                if not item_exists_by_any_id(
+            # Filter out only NEW items that already exist (don't filter existing items we updated)
+            filtered_items = []
+            for item in items_to_yield:
+                # If item has an ID, it's an existing item we updated - always include it
+                if hasattr(item, 'id') and item.id:
+                    filtered_items.append(item)
+                # If item doesn't have an ID, it's a new item - check if it already exists
+                elif not item_exists_by_any_id(
                     imdb_id=item.imdb_id, tvdb_id=item.tvdb_id, tmdb_id=item.tmdb_id
-                )
-            ]
+                ):
+                    filtered_items.append(item)
+            items_to_yield = filtered_items
 
-        logger.info(f"Fetched {len(items_to_yield)} new items from plex watchlist")
+        logger.info(f"Fetched {len(items_to_yield)} items from plex watchlist ({sum(1 for i in items_to_yield if hasattr(i, 'id') and i.id)} updated, {sum(1 for i in items_to_yield if not (hasattr(i, 'id') and i.id))} new)")
         yield items_to_yield
