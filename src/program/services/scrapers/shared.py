@@ -90,13 +90,29 @@ def _parse_results(
             if is_w2p_release:
                 logger.debug(f"Processing W2P release for {item.log_string}: infohash={infohash[:8]}..., title={raw_title[:80]}...")
             
+            # Ensure raw_title is a string (not a dict or other type)
+            if not isinstance(raw_title, str):
+                if is_w2p_release:
+                    logger.warning(f"W2P release has non-string title type {type(raw_title).__name__} for {item.log_string}: infohash={infohash[:8]}..., skipping")
+                continue
+            
+            # Ensure aliases is a clean dict with only string keys and list[str] values
+            # Double-check to prevent any dict values from slipping through
+            clean_aliases = {}
+            for k, v in aliases.items():
+                if isinstance(k, str) and isinstance(v, list):
+                    # Filter out any non-string items from the list
+                    clean_list = [item for item in v if isinstance(item, str)]
+                    if clean_list:
+                        clean_aliases[k] = clean_list
+            
             try:
                 torrent: Torrent = rtn.rank(
                     raw_title=raw_title,
                     infohash=infohash,
                     correct_title=correct_title,
                     remove_trash=profile_settings.options["remove_all_trash"],
-                    aliases=aliases,
+                    aliases=clean_aliases,
                 )
                 
                 if is_w2p_release:
@@ -247,7 +263,24 @@ def _parse_results(
                 processed_infohashes.add(infohash)
             except Exception as e:
                 if is_w2p_release:
-                    logger.warning(f"W2P release failed RTN parsing with exception for {item.log_string}: infohash={infohash[:8]}..., title={raw_title[:80]}..., error={e}")
+                    # Log more details about what RTN received to help debug
+                    error_msg = str(e)
+                    # If error is due to profile filtering (denied by: resolution, hdr_dolby_vision, etc.),
+                    # log at DEBUG level since this is expected behavior
+                    if "denied by:" in error_msg:
+                        logger.debug(
+                            f"W2P release filtered by profile for {item.log_string}: "
+                            f"infohash={infohash[:8]}..., title={raw_title[:80]}..., "
+                            f"reason={error_msg}"
+                        )
+                    else:
+                        # For actual parsing errors, log as warning
+                        logger.warning(
+                            f"W2P release failed RTN parsing with exception for {item.log_string}: "
+                            f"infohash={infohash[:8]}..., title={raw_title[:80]}..., "
+                            f"error={error_msg}, title_type={type(raw_title).__name__}, "
+                            f"aliases_keys={list(clean_aliases.keys())}, aliases_count={len(clean_aliases)}"
+                        )
                 elif log_msg:
                     logger.trace(f"GarbageTorrent: {e}")
                 processed_infohashes.add(infohash)

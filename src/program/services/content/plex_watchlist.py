@@ -370,6 +370,52 @@ class PlexWatchlist:
                         current_aliases = getattr(existing_item, "aliases", {}) or {}
                         current_aliases["w2p_releases"] = releases
                         existing_item.set("aliases", current_aliases)
+                        
+                        # Try to correct the item's year from W2P releases if there's a clear mismatch
+                        # Extract years from W2P release titles (they typically contain the year)
+                        import re
+                        years_from_releases = []
+                        for rel in releases:
+                            title = rel.get("title", "") or rel.get("raw_title", "")
+                            if isinstance(title, str):
+                                # Look for 4-digit years in the title (1900-2099)
+                                year_matches = re.findall(r'\b(19\d{2}|20\d{2})\b', title)
+                                if year_matches:
+                                    try:
+                                        year = int(year_matches[0])
+                                        if 1900 <= year <= 2099:
+                                            years_from_releases.append(year)
+                                    except (ValueError, IndexError):
+                                        pass
+                        
+                        # If we found years in releases and there's a clear consensus, update the item
+                        if years_from_releases:
+                            from collections import Counter
+                            year_counts = Counter(years_from_releases)
+                            most_common_year, count = year_counts.most_common(1)[0]
+                            # If at least 50% of releases agree on the year, and it differs from item's year
+                            if count >= len(years_from_releases) * 0.5:
+                                item_year = None
+                                if hasattr(existing_item, "aired_at") and existing_item.aired_at:
+                                    item_year = existing_item.aired_at.year if hasattr(existing_item.aired_at, "year") else None
+                                elif hasattr(existing_item, "year") and existing_item.year:
+                                    item_year = existing_item.year
+                                
+                                if item_year and item_year != most_common_year:
+                                    # Update the year
+                                    from datetime import datetime
+                                    if hasattr(existing_item, "aired_at"):
+                                        # Update aired_at to the correct year (keeping month/day if available, otherwise Jan 1)
+                                        old_aired_at = existing_item.aired_at
+                                        if isinstance(old_aired_at, datetime):
+                                            new_aired_at = datetime(most_common_year, old_aired_at.month, old_aired_at.day)
+                                        else:
+                                            new_aired_at = datetime(most_common_year, 1, 1)
+                                        existing_item.set("aired_at", new_aired_at)
+                                    if hasattr(existing_item, "year"):
+                                        existing_item.set("year", most_common_year)
+                                    logger.info(f"Corrected year for {d.get('title')} from {item_year} to {most_common_year} based on W2P releases ({count}/{len(years_from_releases)} releases agree)")
+                        
                         # Clear scraped_at and reset state to Indexed to trigger re-scraping with new W2P releases
                         existing_item.set("scraped_at", None)
                         existing_item.store_state(States.Indexed)
