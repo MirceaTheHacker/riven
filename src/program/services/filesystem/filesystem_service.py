@@ -25,7 +25,12 @@ class FilesystemService:
         self.riven_vfs = None
         self.downloader = downloader  # Store for potential reinit
         # Get symlink library path from environment variable (set by DUMB)
+        # Check environment variable each time to allow it to be set after initialization
         self.symlink_library_path = os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
+        if self.symlink_library_path:
+            logger.info(f"FilesystemService: Symlink library path configured: {self.symlink_library_path}")
+        else:
+            logger.debug("FilesystemService: Symlink library path not configured (RIVEN_SYMLINK_LIBRARY_PATH not set)")
         self._initialize_rivenvfs(downloader)
 
     def _initialize_rivenvfs(self, downloader: Downloader):
@@ -79,6 +84,12 @@ class FilesystemService:
 
         # Process each episode/movie
         for episode_or_movie in items_to_process:
+            # Re-check environment variable in case it was set after initialization
+            symlink_path = self.symlink_library_path or os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
+            if not self.symlink_library_path and symlink_path:
+                self.symlink_library_path = symlink_path
+                logger.info(f"FilesystemService: Symlink library path now configured: {self.symlink_library_path}")
+            
             # Remove existing nodes to keep VFS in sync with current entries/retention
             # Also remove old symlinks before removing from VFS
             if self.symlink_library_path:
@@ -147,8 +158,16 @@ class FilesystemService:
         This creates symlinks for all VFS paths associated with the item,
         allowing external services (like Plex) to access files via the symlink path.
         """
-        if not self.symlink_library_path:
+        # Re-check environment variable in case it was set after initialization
+        symlink_path = self.symlink_library_path or os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
+        if not symlink_path:
+            logger.debug(f"Symlink library path not configured, skipping symlink creation for {item.log_string}")
             return
+        
+        # Update instance variable if it was just read from environment
+        if not self.symlink_library_path and symlink_path:
+            self.symlink_library_path = symlink_path
+            logger.info(f"FilesystemService: Symlink library path now configured: {self.symlink_library_path}")
         
         if not self.riven_vfs or not getattr(self.riven_vfs, "_mounted", False):
             logger.debug("RivenVFS not mounted, skipping symlink creation")
@@ -160,8 +179,12 @@ class FilesystemService:
             logger.debug(f"No filesystem entries for {item.log_string}, skipping symlink creation")
             return
         
+        logger.debug(f"Creating symlinks for {item.log_string} with {len(entries)} filesystem entries, symlink path: {self.symlink_library_path}")
+        
         mount_path = str(self.settings.mount_path)
         symlinks_created = 0
+        
+        logger.debug(f"Creating symlinks for {item.log_string} with {len(entries)} filesystem entries, symlink path: {self.symlink_library_path}")
         
         for entry in entries:
             try:
