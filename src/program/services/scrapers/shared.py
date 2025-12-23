@@ -57,10 +57,16 @@ def _parse_results(
         aliases: Dict[str, list[str]] = (
             item.get_aliases() if scraping_settings.enable_aliases else {}
         )
+        # Filter out w2p_releases and any non-string alias values
+        # RTN expects Dict[str, list[str]], so we need to ensure all values are lists of strings
+        # w2p_releases is a list of dicts, not a list of strings, so it must be excluded
         aliases = {
             k: v
             for k, v in aliases.items()
             if k not in profile_settings.languages.exclude
+            and k != "w2p_releases"  # Exclude w2p_releases - it's a list of dicts, not strings
+            and isinstance(v, list)
+            and all(isinstance(alias_item, str) for alias_item in v)
         }
 
         rtn = RTN(profile_settings, ranking_model)
