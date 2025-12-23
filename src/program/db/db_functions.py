@@ -417,7 +417,14 @@ def run_thread_with_db_item(
             if isinstance(i, list):
                 for item in i:
                     if isinstance(item, MediaItem):
-                        program.em.add_item(item, service)
+                        # If item has an ID, it's an existing item - queue it by ID
+                        # Otherwise, it's a new item - use add_item which handles new items
+                        if hasattr(item, 'id') and item.id:
+                            from program.types import Event
+                            program.em.add_event(Event(service, item_id=item.id))
+                            logger.debug(f"Queued existing item {item.log_string} (ID: {item.id}) for processing")
+                        else:
+                            program.em.add_item(item, service)
     return None
 
 
