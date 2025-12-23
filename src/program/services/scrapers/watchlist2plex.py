@@ -50,7 +50,26 @@ class Watchlist2PlexScraper:
             if not infohash:
                 logger.debug(f"W2P release missing infohash: {rel.get('title', 'unknown')}")
                 continue
-            releases[infohash.lower()] = rel.get("title") or rel.get("raw_title") or ""
+            
+            # Extract and clean the title - W2P titles may contain newlines, emojis, and extra formatting
+            raw_title = rel.get("title") or rel.get("raw_title") or ""
+            if isinstance(raw_title, str):
+                # Remove newlines, emojis, and extra whitespace
+                import re
+                # Remove emojis and special unicode characters (keep basic ASCII and common punctuation)
+                cleaned_title = re.sub(r'[^\x00-\x7F]+', ' ', raw_title)
+                # Remove newlines and extra whitespace
+                cleaned_title = re.sub(r'\s+', ' ', cleaned_title).strip()
+                # Take only the first line if there are multiple lines (before newline)
+                cleaned_title = cleaned_title.split('\n')[0].strip()
+                releases[infohash.lower()] = cleaned_title
+            elif isinstance(raw_title, dict):
+                # If title is a dict, try to extract a string value
+                logger.warning(f"W2P release has dict title instead of string: {raw_title}, using infohash as fallback")
+                releases[infohash.lower()] = f"W2P Release {infohash[:8]}"
+            else:
+                # Fallback to empty string
+                releases[infohash.lower()] = str(raw_title) if raw_title else ""
 
         if not releases:
             logger.warning(f"No W2P infohashes extracted for {item.log_string} despite {len(w2p_releases)} releases")
