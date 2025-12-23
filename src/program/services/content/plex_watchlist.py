@@ -195,7 +195,7 @@ class PlexWatchlist:
             # This ensures we get the most up-to-date release data from DMM
             items_to_harvest = []
             for item in watchlist_items:
-                # Check if item exists in database (for logging purposes)
+                # Check if item exists in database (for logging purposes and to get title)
                 existing_item = None
                 if item.get("imdb_id"):
                     existing_item = get_item_by_external_id(imdb_id=item["imdb_id"])
@@ -204,7 +204,11 @@ class PlexWatchlist:
                 if not existing_item and item.get("tvdb_id"):
                     existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
                 
+                # Get title from database if item exists, otherwise use item's title or fallback to identifier
                 if existing_item:
+                    # Use title from database if available
+                    if not item.get("title") and hasattr(existing_item, "title") and existing_item.title:
+                        item["title"] = existing_item.title
                     # Check if item already has W2P releases stored (for logging)
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
@@ -214,6 +218,13 @@ class PlexWatchlist:
                         logger.debug(f"Including {item.get('title', 'unknown')} - exists in database but has no W2P releases (will check for better quality)")
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
+                
+                # If still no title, use identifier as fallback (W2P needs a title for searching)
+                if not item.get("title"):
+                    identifier = item.get("imdb_id") or item.get("tmdb_id") or item.get("tvdb_id")
+                    if identifier:
+                        item["title"] = identifier  # W2P can use ID to search if title is missing
+                        logger.warning(f"Watchlist item missing title, using identifier '{identifier}' as fallback")
                 
                 # Log item structure for debugging
                 logger.debug(f"Item to harvest structure: keys={list(item.keys())}, title={item.get('title')}, imdb={item.get('imdb_id')}, tmdb={item.get('tmdb_id')}, tvdb={item.get('tvdb_id')}")
