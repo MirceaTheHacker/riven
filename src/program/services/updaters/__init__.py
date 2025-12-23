@@ -22,7 +22,15 @@ class Updater:
 
     def __init__(self):
         self.key = "updater"
-        self.library_path = settings_manager.settings.updaters.library_path
+        # Prefer symlink library path from environment (set by DUMB) if available
+        # Otherwise use configured library_path
+        import os
+        symlink_library_path = os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
+        if symlink_library_path:
+            self.library_path = symlink_library_path
+            logger.info(f"Using symlink library path: {self.library_path}")
+        else:
+            self.library_path = settings_manager.settings.updaters.library_path
         self.services = {
             PlexUpdater: PlexUpdater(),
             JellyfinUpdater: JellyfinUpdater(),

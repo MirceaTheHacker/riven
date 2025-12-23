@@ -259,8 +259,8 @@ class PlexWatchlist:
 
         # Harvest releases via W2P for watchlist items
         if watchlist_items:
-            # Always call W2P for watchlist items to get latest releases
-            # This ensures we get the most up-to-date release data from DMM
+            # Call W2P for watchlist items to get latest releases
+            # Skip items that are already completed with streams to avoid unnecessary calls
             items_to_harvest = []
             for item in watchlist_items:
                 # Check if item exists in database (for logging purposes and to get title)
@@ -277,6 +277,16 @@ class PlexWatchlist:
                     # Use title from database if available
                     if not item.get("title") and hasattr(existing_item, "title") and existing_item.title:
                         item["title"] = existing_item.title
+                    
+                    # Skip W2P call if item is already completed with streams
+                    item_state = existing_item.state
+                    has_streams = hasattr(existing_item, "streams") and len(getattr(existing_item, "streams", [])) > 0
+                    is_completed = item_state == States.Completed
+                    
+                    if is_completed and has_streams:
+                        logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with streams, no need to refresh from W2P")
+                        continue
+                    
                     # Check if item already has W2P releases stored (for logging)
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
