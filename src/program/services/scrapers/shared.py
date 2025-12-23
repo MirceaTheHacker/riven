@@ -185,12 +185,26 @@ def _parse_results(
                         )
                         continue
 
+                # Check if this infohash came from W2P releases (already validated by DMM)
+                aliases = getattr(item, "aliases", {}) or {}
+                w2p_releases = aliases.get("w2p_releases") or []
+                is_w2p_release = any(
+                    rel.get("infohash", "").lower() == infohash.lower()
+                    for rel in w2p_releases
+                )
+                
                 if torrent.data.year and not _check_item_year(item, torrent.data):
                     # If year is present, then check to make sure it's correct
-                    logger.debug(
-                        f"Skipping torrent for incorrect year with {item.log_string}: {raw_title}"
-                    )
-                    continue
+                    # Skip year check for W2P releases since they're already validated by DMM
+                    if not is_w2p_release:
+                        logger.debug(
+                            f"Skipping torrent for incorrect year with {item.log_string}: {raw_title}"
+                        )
+                        continue
+                    else:
+                        logger.debug(
+                            f"Bypassing year check for W2P-validated release: {raw_title} (item year: {item.aired_at.year if item.aired_at else 'N/A'}, torrent year: {torrent.data.year})"
+                        )
 
                 if item.is_anime and scraping_settings.dubbed_anime_only:
                     # If anime and user wants dubbed only, then check to make sure it's dubbed
