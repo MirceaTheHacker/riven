@@ -11,21 +11,25 @@ class Watchlist2PlexScraper:
     key = "watchlist2plex"
 
     def __init__(self):
+        # Always enable this scraper - it only processes items that have W2P releases
+        # If an item doesn't have W2P releases, the scraper will return an empty dict
+        # This allows W2P releases to be used even if settings model doesn't have watchlist2plex
         try:
             w2p_settings = getattr(settings_manager.settings.content, "watchlist2plex", None)
             if w2p_settings:
-                self.initialized = getattr(w2p_settings, "enabled", False)
+                self.initialized = getattr(w2p_settings, "enabled", True)  # Default to True if enabled attr missing
             else:
-                self.initialized = False
-                logger.warning("Watchlist2PlexScraper: watchlist2plex settings not found in ContentModel, scraper disabled")
+                # If settings not found, enable anyway - scraper is safe to run
+                self.initialized = True
+                logger.debug("Watchlist2PlexScraper: watchlist2plex settings not found in ContentModel, enabling scraper anyway")
         except Exception as e:
-            logger.error(f"Watchlist2PlexScraper: Failed to initialize: {e}")
-            self.initialized = False
+            logger.warning(f"Watchlist2PlexScraper: Failed to check settings, enabling anyway: {e}")
+            self.initialized = True  # Enable on error - scraper is safe to run
         
         if self.initialized:
             logger.info("Watchlist2PlexScraper initialized and enabled")
         else:
-            logger.debug("Watchlist2PlexScraper initialized but disabled")
+            logger.warning("Watchlist2PlexScraper initialized but disabled")
 
     def run(self, item: MediaItem) -> Dict[str, str]:
         """Return mapping of infohash -> raw title using W2P releases stored on the item."""

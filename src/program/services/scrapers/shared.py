@@ -72,6 +72,18 @@ def _parse_results(
             if infohash in processed_infohashes:
                 # Already processed this infohash within this profile
                 continue
+            
+            # Check if this is a W2P release
+            aliases_dict = getattr(item, "aliases", {}) or {}
+            w2p_releases = aliases_dict.get("w2p_releases") or []
+            is_w2p_release = any(
+                rel.get("infohash", "").lower() == infohash.lower()
+                for rel in w2p_releases
+            )
+            
+            if is_w2p_release:
+                logger.debug(f"Processing W2P release for {item.log_string}: infohash={infohash[:8]}..., title={raw_title[:80]}...")
+            
             try:
                 torrent: Torrent = rtn.rank(
                     raw_title=raw_title,

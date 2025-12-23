@@ -44,6 +44,7 @@ class Scraping:
         self.initialized_services = [
             service for service in self.services if service.initialized
         ]
+        logger.info(f"Scraping service initialized with {len(self.initialized_services)} active scrapers: {[s.key for s in self.initialized_services]}")
         self.initialized = self.validate()
         if not self.initialized:
             return
