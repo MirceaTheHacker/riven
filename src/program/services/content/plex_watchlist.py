@@ -148,9 +148,14 @@ class PlexWatchlist:
         return payload
 
     def _call_w2p(self, items_payload: list[dict]) -> dict[str, dict]:
-        if not self.w2p_settings or not getattr(self.w2p_settings, 'enabled', False):
+        if not self.w2p_settings:
+            logger.warning("W2P settings not available")
+            return {}
+        if not getattr(self.w2p_settings, 'enabled', False):
+            logger.warning("W2P is not enabled in settings")
             return {}
         if not items_payload:
+            logger.warning("W2P payload is empty, skipping call")
             return {}
 
         headers = {}
@@ -170,6 +175,10 @@ class PlexWatchlist:
         else:
             harvest_url = base_url
 
+        logger.info(f"Calling W2P at URL: {harvest_url} with {len(items_payload)} items")
+        logger.debug(f"W2P request payload: {items_payload}")
+        logger.debug(f"W2P request headers: {headers}")
+
         try:
             with httpx.Client(timeout=120.0) as client:  # Increased timeout for browser automation
                 resp = client.post(
@@ -177,6 +186,7 @@ class PlexWatchlist:
                     json={"items": items_payload},
                     headers=headers,
                 )
+                logger.debug(f"W2P response status: {resp.status_code}")
                 resp.raise_for_status()
                 data = resp.json()
                 logger.info(f"W2P harvest returned {len(data.get('items', []))} items")
@@ -188,8 +198,17 @@ class PlexWatchlist:
                     logger.warning(f"W2P first item full structure: {first_item}")
                 else:
                     logger.warning(f"W2P returned no items in response. Full response: {data}")
+        except httpx.TimeoutException as e:
+            logger.error(f"W2P request timed out after 120s to {harvest_url}: {e}")
+            return {}
+        except httpx.ConnectError as e:
+            logger.error(f"W2P connection error - cannot reach {harvest_url}. Is W2P running? Error: {e}")
+            return {}
+        except httpx.HTTPStatusError as e:
+            logger.error(f"W2P returned HTTP error {e.response.status_code} for {harvest_url}: {e.response.text}")
+            return {}
         except Exception as e:
-            logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}")
+            logger.error(f"Failed calling Watchlist2Plex harvest endpoint {harvest_url}: {e}", exc_info=True)
             return {}
 
         releases_map: dict[str, dict] = {}
