@@ -197,13 +197,37 @@ class FilesystemService:
                     import subprocess
                     try:
                         # Extract key parts from filename for better matching
-                        # Use the base filename without extension, and search for files containing key parts
-                        base_parts = os.path.splitext(original_filename)[0].split('.')
-                        # Get significant parts (skip very short parts like "H", "DL", etc.)
-                        significant_parts = [p for p in base_parts if len(p) > 2]
-                        if significant_parts:
-                            # Use the first few significant parts for matching
-                            search_pattern = '*'.join(significant_parts[:5])  # Use first 5 significant parts
+                        # Strategy 1: Use a simpler pattern with just the first significant word parts
+                        # Split by both dots and spaces to get individual words
+                        base_name_no_ext = os.path.splitext(original_filename)[0]
+                        # Replace dots and dashes with spaces, then split
+                        words = base_name_no_ext.replace('.', ' ').replace('-', ' ').replace('_', ' ').split()
+                        # Get significant words (skip very short ones and common words)
+                        skip_words = {'and', 'the', 'a', 'an', 'of', 'in', 'on', 'at', 'to', 'for', 'is', 'it'}
+                        significant_words = [w for w in words if len(w) > 2 and w.lower() not in skip_words]
+                        
+                        # Try multiple pattern strategies
+                        patterns_to_try = []
+                        
+                        # Strategy 1: Use first 3-4 significant words (more flexible)
+                        if len(significant_words) >= 3:
+                            patterns_to_try.append('*'.join(significant_words[:4]))
+                        
+                        # Strategy 2: Use the original filename base (for exact matches)
+                        # Remove extension and use first part before any dots
+                        first_part = base_name_no_ext.split('.')[0] if '.' in base_name_no_ext else base_name_no_ext
+                        if len(first_part) > 5:
+                            patterns_to_try.append(first_part)
+                        
+                        # Strategy 3: Use first 2 significant words + year if present
+                        import re
+                        year_match = re.search(r'\b(19|20)\d{2}\b', base_name_no_ext)
+                        if year_match and len(significant_words) >= 2:
+                            year = year_match.group(0)
+                            patterns_to_try.append('*'.join(significant_words[:2] + [year]))
+                        
+                        # Try each pattern until one works
+                        for search_pattern in patterns_to_try:
                             find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{search_pattern}*', '-print', '-quit']
                             logger.debug(f"Trying find command with pattern: *{search_pattern}* in {search_dir}")
                             result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=5)
@@ -223,6 +247,10 @@ class FilesystemService:
                                         logger.debug(f"Find found file but it's not accessible: {file_path}")
                             else:
                                 logger.debug(f"Find command returned no results for pattern *{search_pattern}*")
+                                continue  # Try next pattern
+                        
+                        # If no pattern worked, log and continue to os.walk fallback
+                        logger.debug(f"All find patterns failed, falling back to os.walk")
                     except subprocess.TimeoutExpired:
                         logger.debug(f"find command timed out, using os.walk")
                     except (FileNotFoundError, Exception) as e:
