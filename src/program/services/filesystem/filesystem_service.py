@@ -146,10 +146,11 @@ class FilesystemService:
             logger.error("FilesystemService: RivenVFS not initialized")
             return False
 
-        # Check RivenVFS is mounted
+        # Check RivenVFS is mounted (warn but don't fail - we can still create symlinks)
         if not getattr(self.riven_vfs, "_mounted", False):
-            logger.error("FilesystemService: RivenVFS not mounted")
-            return False
+            logger.warning("FilesystemService: RivenVFS not mounted (pyfuse3 may be missing). Symlinks will point directly to actual files.")
+            # Don't return False - we can still function without VFS mount
+            # The symlink creation will use actual file paths instead of VFS paths
 
         return True
 
@@ -184,8 +185,13 @@ class FilesystemService:
         
         logger.info(f"_find_actual_file_path: Searching for '{original_filename}' (infohash: {infohash[:8] if infohash else 'none'}...) in /mnt/debrid/riven/")
         
-        # Search in /mnt/debrid/riven/movies/ and /mnt/debrid/riven/__all__/
+        # Search in appropriate directories based on item type
+        # For episodes, also search in /mnt/debrid/riven/shows/
         search_dirs = ["/mnt/debrid/riven/movies", "/mnt/debrid/riven/__all__"]
+        # Check if this is an episode by looking at the entry's parent item (if available)
+        # Episodes should be in /shows/ directory
+        if "S0" in original_filename.upper() or "SEASON" in original_filename.upper() or "E0" in original_filename.upper():
+            search_dirs.insert(0, "/mnt/debrid/riven/shows")  # Prioritize shows directory for episodes
         
         # Extract key parts from original filename for matching
         original_lower = original_filename.lower()
@@ -267,23 +273,31 @@ class FilesystemService:
                                 # Check if there's significant overlap (at least 2-3 key parts match)
                                 overlap = original_key_parts.intersection(file_key_parts)
                                 
-                                # Stricter matching: require exact filename match OR high overlap (>=4 words) OR infohash match
+                                # Stricter matching: require exact filename match OR very high overlap (>=5 words) OR exact base name match
+                                # Only cache EXACT matches to prevent wrong files from being cached
                                 # This prevents false matches like "Witchfinder General" matching "American Psycho"
+                                # or "The Blacklist S01E01" matching "Bad Boys for Life"
                                 file_matches = (
                                     original_lower == file_basename or  # Exact match (best)
                                     file_basename == original_lower or  # Reverse exact match
-                                    (len(overlap) >= 4 and infohash) or  # High overlap + infohash (very reliable)
-                                    (len(overlap) >= 5)  # Very high overlap even without infohash
+                                    base_name == file_basename or  # Base name exact match
+                                    filename_no_ext == file_basename  # Filename without ext exact match
                                 )
                                 
-                                if file_matches:
+                                # For non-exact matches, require VERY high overlap (>=6 words) to prevent false positives
+                                # And do NOT cache these - only cache exact matches
+                                loose_match = len(overlap) >= 6
+                                
+                                if file_matches or loose_match:
                                     if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                        # Cache the mapping if we have infohash
-                                        if infohash:
+                                        # Only cache EXACT matches to prevent wrong files from polluting the cache
+                                        if file_matches and infohash:
                                             self._infohash_cache[infohash.lower()] = file_path
-                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts, cached for infohash {infohash[:8]}...)")
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match, cached for infohash {infohash[:8]}...)")
+                                        elif file_matches:
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match)")
                                         else:
-                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts)")
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (loose match {len(overlap)} words, NOT cached)")
                                         return file_path
                                     else:
                                         logger.debug(f"Find found file but it's not accessible: {file_path}")
@@ -320,24 +334,31 @@ class FilesystemService:
                             file_words = set([w.lower() for w in file_lower.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
                             overlap = original_words.intersection(file_words)
                             
-                            # Stricter matching: require exact match OR high overlap (>=4 words) OR infohash match
+                            # Stricter matching: require exact match OR very high overlap (>=6 words)
+                            # Only cache EXACT matches to prevent wrong files from being cached
                             # This prevents false matches like "Witchfinder General" matching "American Psycho"
-                            matches = (
+                            # or "The Blacklist S01E01" matching "Bad Boys for Life"
+                            exact_match = (
                                 original_lower == file_lower or  # Exact match (best)
                                 file_lower == original_lower or  # Reverse exact match
-                                (len(overlap) >= 4 and infohash) or  # High overlap + infohash (very reliable)
-                                (len(overlap) >= 5)  # Very high overlap even without infohash
+                                base_name == file_lower or  # Base name exact match
+                                filename_no_ext == file_lower  # Filename without ext exact match
                             )
                             
-                            if matches:
+                            # For non-exact matches, require VERY high overlap (>=6 words) to prevent false positives
+                            loose_match = len(overlap) >= 6
+                            
+                            if exact_match or loose_match:
                                 # Verify it's a regular file and readable
                                 if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                    # Cache the mapping if we have infohash
-                                    if infohash:
+                                    # Only cache EXACT matches to prevent wrong files from polluting the cache
+                                    if exact_match and infohash:
                                         self._infohash_cache[infohash.lower()] = file_path
-                                        logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file}, cached for infohash {infohash[:8]}...)")
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (exact match: {file}, cached for infohash {infohash[:8]}...)")
+                                    elif exact_match:
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (exact match: {file})")
                                     else:
-                                        logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file})")
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (loose match: {file}, {len(overlap)} words, NOT cached)")
                                     return file_path
                             
                             # Limit search to avoid being too slow (increased limit)
@@ -377,9 +398,17 @@ class FilesystemService:
             self.symlink_library_path = symlink_path
             logger.info(f"FilesystemService: Symlink library path now configured: {self.symlink_library_path}")
         
-        if not self.riven_vfs or not getattr(self.riven_vfs, "_mounted", False):
-            logger.debug("RivenVFS not mounted, skipping symlink creation")
+        # Even if RivenVFS is not mounted, we can still create symlinks to actual files
+        # The VFS mount is optional - symlinks can point directly to /mnt/debrid/riven/ files
+        if not self.riven_vfs:
+            logger.debug("RivenVFS not initialized, skipping symlink creation")
             return
+        
+        # If VFS is not mounted, we'll still create symlinks using actual file paths
+        # (which are found via _find_actual_file_path)
+        vfs_mounted = getattr(self.riven_vfs, "_mounted", False)
+        if not vfs_mounted:
+            logger.debug("RivenVFS not mounted, but will still create symlinks to actual files")
         
         # Get all filesystem entries for this item
         entries = getattr(item, "filesystem_entries", None) or []
