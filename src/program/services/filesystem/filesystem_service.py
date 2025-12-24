@@ -151,12 +151,51 @@ class FilesystemService:
 
         return True
 
+    def _find_actual_file_path(self, entry, vfs_path: str) -> str | None:
+        """
+        Find the actual file path in /mnt/debrid/riven/ for a given MediaEntry.
+        
+        This searches for the file using the original_filename or infohash to match
+        against files in /mnt/debrid/riven/movies/ or /mnt/debrid/riven/__all__/.
+        
+        Returns the actual file path if found, None otherwise.
+        """
+        original_filename = getattr(entry, "original_filename", None)
+        infohash = getattr(entry, "infohash", None)
+        
+        if not original_filename:
+            return None
+        
+        # Search in /mnt/debrid/riven/movies/ and /mnt/debrid/riven/__all__/
+        search_dirs = ["/mnt/debrid/riven/movies", "/mnt/debrid/riven/__all__"]
+        
+        for search_dir in search_dirs:
+            if not os.path.exists(search_dir):
+                continue
+            
+            try:
+                # Search for files matching the original filename
+                for root, dirs, files in os.walk(search_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        # Match by original filename (case-insensitive, partial match)
+                        if original_filename.lower() in file.lower() or file.lower() in original_filename.lower():
+                            # Verify it's a regular file and readable
+                            if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
+                                logger.debug(f"Found actual file for {original_filename}: {file_path}")
+                                return file_path
+            except Exception as e:
+                logger.debug(f"Error searching {search_dir} for {original_filename}: {e}")
+                continue
+        
+        return None
+
     def _create_symlinks(self, item: MediaItem):
         """
-        Create symlinks from VFS mount point to symlink library path.
+        Create symlinks from actual files in /mnt/debrid/riven/ to symlink library path.
         
-        This creates symlinks for all VFS paths associated with the item,
-        allowing external services (like Plex) to access files via the symlink path.
+        This creates symlinks pointing to the actual downloaded files instead of the VFS mount,
+        which ensures Plex can properly access and scan the files.
         """
         # Re-check environment variable in case it was set after initialization
         symlink_path = self.symlink_library_path or os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
@@ -184,8 +223,6 @@ class FilesystemService:
         mount_path = str(self.settings.mount_path)
         symlinks_created = 0
         
-        logger.debug(f"Creating symlinks for {item.log_string} with {len(entries)} filesystem entries, symlink path: {self.symlink_library_path}")
-        
         for entry in entries:
             try:
                 # Get all VFS paths for this entry
@@ -194,8 +231,60 @@ class FilesystemService:
                     continue
                 
                 for vfs_path in vfs_paths:
-                    # Build source path (in VFS mount)
-                    source_path = os.path.join(mount_path, vfs_path.lstrip("/"))
+                    # Try to find the actual file path in /mnt/debrid/riven/ first
+                    # This ensures Plex can access the files properly (FUSE mounts through symlinks can be problematic)
+                    actual_file_path = self._find_actual_file_path(entry, vfs_path)
+                    
+                    if actual_file_path:
+                        # Use the actual file path instead of VFS mount
+                        source_path = actual_file_path
+                        logger.debug(f"Using actual file path for symlink: {source_path}")
+                    else:
+                        # Fallback to VFS mount path
+                        source_path = os.path.join(mount_path, vfs_path.lstrip("/"))
+                        
+                        # Verify the source file actually exists in the VFS
+                        # If not, try to find the actual file in the VFS directory
+                        if not os.path.exists(source_path):
+                            # Get the directory and filename from the path
+                            vfs_dir = os.path.dirname(source_path)
+                            expected_filename = os.path.basename(source_path)
+                            
+                            # If the directory exists, list files and try to find a match
+                            if os.path.isdir(vfs_dir):
+                                try:
+                                    actual_files = os.listdir(vfs_dir)
+                                    # Try to find a file that matches the entry's original filename
+                                    # or matches the expected filename pattern
+                                    matching_file = None
+                                    entry_filename = getattr(entry, "original_filename", None) or ""
+                                    
+                                    for actual_file in actual_files:
+                                        actual_path = os.path.join(vfs_dir, actual_file)
+                                        # Match if it's the same base name or matches original filename
+                                        if (os.path.basename(actual_file) == expected_filename or
+                                            (entry_filename and entry_filename in actual_file)):
+                                            matching_file = actual_file
+                                            source_path = os.path.join(vfs_dir, matching_file)
+                                            # Update vfs_path to match the actual file
+                                            vfs_path = os.path.join(os.path.dirname(vfs_path), matching_file)
+                                            logger.debug(f"Found actual VFS file: {matching_file} (expected: {expected_filename})")
+                                            break
+                                    
+                                    if not matching_file:
+                                        logger.warning(f"Source file does not exist and no match found: {source_path} (expected: {expected_filename}, found: {actual_files})")
+                                        continue
+                                except Exception as e:
+                                    logger.warning(f"Failed to list VFS directory {vfs_dir}: {e}")
+                                    continue
+                            else:
+                                logger.debug(f"VFS directory does not exist: {vfs_dir}, skipping symlink for {vfs_path}")
+                                continue
+                    
+                    # Verify the source file exists and is readable
+                    if not os.path.exists(source_path) or not os.access(source_path, os.R_OK):
+                        logger.warning(f"Source file does not exist or is not readable: {source_path}, skipping symlink")
+                        continue
                     
                     # Build target path (in symlink library)
                     target_path = os.path.join(self.symlink_library_path, vfs_path.lstrip("/"))
@@ -213,8 +302,9 @@ class FilesystemService:
                     if os.path.exists(target_path):
                         if os.path.islink(target_path):
                             # Check if symlink is broken
-                            if not os.path.exists(os.readlink(target_path)):
-                                logger.debug(f"Removing broken symlink: {target_path}")
+                            link_target = os.readlink(target_path)
+                            if not os.path.exists(link_target):
+                                logger.debug(f"Removing broken symlink: {target_path} -> {link_target}")
                                 try:
                                     os.remove(target_path)
                                 except Exception as e:
