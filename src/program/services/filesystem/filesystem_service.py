@@ -179,73 +179,103 @@ class FilesystemService:
         # Also try without the extension in the search
         filename_no_ext = os.path.splitext(os.path.basename(original_filename))[0].lower()
         
-        for search_dir in search_dirs:
-            if not os.path.exists(search_dir):
-                logger.debug(f"_find_actual_file_path: Search directory does not exist: {search_dir}")
-                continue
+        # Try searching multiple times with a small delay (files might not be synced to rclone mount immediately)
+        max_retries = 2
+        for retry in range(max_retries):
+            if retry > 0:
+                import time
+                logger.debug(f"_find_actual_file_path: Retry {retry} after brief delay (file might not be synced yet)")
+                time.sleep(1)  # Wait 1 second before retry
             
-            try:
-                # First, try using find command for faster searching (much faster than os.walk)
-                import subprocess
-                try:
-                    # Escape the filename for shell safety and search
-                    safe_pattern = original_filename.replace('[', '\\[').replace(']', '\\]')
-                    find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{safe_pattern}*', '-print', '-quit']
-                    result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=3)
-                    
-                    if result.returncode == 0 and result.stdout.strip():
-                        file_path = result.stdout.strip()
-                        if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                            logger.info(f"Found actual file via find command for {original_filename}: {file_path}")
-                            return file_path
-                except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-                    logger.debug(f"find command failed or not available, using os.walk: {e}")
+            for search_dir in search_dirs:
+                if not os.path.exists(search_dir):
+                    logger.debug(f"_find_actual_file_path: Search directory does not exist: {search_dir}")
+                    continue
                 
-                # Fallback to os.walk if find doesn't work
-                files_checked = 0
-                for root, dirs, files in os.walk(search_dir):
-                    # Limit search depth to avoid going too deep
-                    if root.count(os.sep) > search_dir.count(os.sep) + 2:
-                        dirs[:] = []  # Don't recurse deeper
-                        continue
+                try:
+                    # First, try using find command for faster searching (much faster than os.walk)
+                    import subprocess
+                    try:
+                        # Extract key parts from filename for better matching
+                        # Use the base filename without extension, and search for files containing key parts
+                        base_parts = os.path.splitext(original_filename)[0].split('.')
+                        # Get significant parts (skip very short parts like "H", "DL", etc.)
+                        significant_parts = [p for p in base_parts if len(p) > 2]
+                        if significant_parts:
+                            # Use the first few significant parts for matching
+                            search_pattern = '*'.join(significant_parts[:5])  # Use first 5 significant parts
+                            find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{search_pattern}*', '-print', '-quit']
+                            logger.debug(f"Trying find command with pattern: *{search_pattern}* in {search_dir}")
+                            result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=5)
+                            
+                            logger.debug(f"Find command result: returncode={result.returncode}, stdout={result.stdout.strip()[:100] if result.stdout else 'empty'}, stderr={result.stderr.strip()[:100] if result.stderr else 'empty'}")
+                            
+                            if result.returncode == 0 and result.stdout.strip():
+                                file_path = result.stdout.strip()
+                                # Verify the file matches the original filename
+                                file_basename = os.path.basename(file_path).lower()
+                                if (original_lower in file_basename or file_basename in original_lower or
+                                    base_name in file_basename or filename_no_ext in file_basename):
+                                    if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
+                                        logger.info(f"Found actual file via find command for {original_filename}: {file_path}")
+                                        return file_path
+                                    else:
+                                        logger.debug(f"Find found file but it's not accessible: {file_path}")
+                            else:
+                                logger.debug(f"Find command returned no results for pattern *{search_pattern}*")
+                    except subprocess.TimeoutExpired:
+                        logger.debug(f"find command timed out, using os.walk")
+                    except (FileNotFoundError, Exception) as e:
+                        logger.debug(f"find command failed or not available, using os.walk: {e}")
                     
-                    for file in files:
-                        files_checked += 1
-                        file_path = os.path.join(root, file)
-                        file_lower = file.lower()
+                    # Fallback to os.walk if find doesn't work
+                    files_checked = 0
+                    for root, dirs, files in os.walk(search_dir):
+                        # Limit search depth to avoid going too deep
+                        if root.count(os.sep) > search_dir.count(os.sep) + 2:
+                            dirs[:] = []  # Don't recurse deeper
+                            continue
                         
-                        # Match by original filename (case-insensitive)
-                        # Check multiple matching strategies
-                        file_basename = os.path.basename(file_path).lower()
-                        matches = (
-                            original_lower in file_lower or 
-                            file_lower in original_lower or
-                            base_name in file_lower or
-                            filename_no_ext in file_basename or
-                            file_basename == original_lower or
-                            file_basename == base_name
-                        )
+                        for file in files:
+                            files_checked += 1
+                            file_path = os.path.join(root, file)
+                            file_lower = file.lower()  # Just the filename, not the full path
+                            file_basename = file_lower  # Same thing for files in the loop
+                            
+                            # Match by original filename (case-insensitive)
+                            # Check multiple matching strategies - compare filename to filename
+                            matches = (
+                                original_lower == file_lower or  # Exact match
+                                original_lower in file_lower or   # Original contained in file
+                                file_lower in original_lower or    # File contained in original
+                                base_name in file_lower or         # Base name in file
+                                filename_no_ext in file_lower or   # Filename without ext in file
+                                file_lower == base_name            # File equals base name
+                            )
+                            
+                            if matches:
+                                # Verify it's a regular file and readable
+                                if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
+                                    logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file})")
+                                    return file_path
+                            
+                            # Limit search to avoid being too slow (increased limit)
+                            if files_checked > 2000:
+                                logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, stopping search to avoid timeout")
+                                break
                         
-                        if matches:
-                            # Verify it's a regular file and readable
-                            if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                logger.info(f"Found actual file for {original_filename}: {file_path}")
-                                return file_path
-                        
-                        # Limit search to avoid being too slow (increased limit)
                         if files_checked > 2000:
-                            logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, stopping search to avoid timeout")
                             break
                     
-                    if files_checked > 2000:
-                        break
-                
-                logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, no match found")
-            except Exception as e:
-                logger.warning(f"Error searching {search_dir} for {original_filename}: {e}")
-                continue
+                    logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, no match found")
+                except Exception as e:
+                    logger.warning(f"Error searching {search_dir} for {original_filename}: {e}")
+                    continue
+            
+            # If we found a file in this retry, return it
+            # (This check is redundant since we return immediately, but keeps structure clear)
         
-        logger.debug(f"_find_actual_file_path: No actual file found for {original_filename}, will use VFS mount path")
+        logger.warning(f"_find_actual_file_path: No actual file found for {original_filename} after {max_retries} retries, will use VFS mount path")
         return None
 
     def _create_symlinks(self, item: MediaItem):
