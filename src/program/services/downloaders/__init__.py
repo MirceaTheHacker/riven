@@ -761,6 +761,8 @@ class Downloader:
                 profile_entry.library_profiles = library_profiles
 
                 # Check if an entry with the same infohash AND profile_name already exists
+                # We need to check ALL entries, not just the first match, to ensure we don't
+                # accidentally update an entry with a different profile_name
                 existing_entry = None
                 for e in item.filesystem_entries:
                     if getattr(e, "infohash", "").lower() == download_result.infohash.lower():
@@ -770,7 +772,8 @@ class Downloader:
                             existing_profile = e.media_metadata.get("profile_name") if isinstance(e.media_metadata, dict) else getattr(e.media_metadata, "profile_name", None)
                         
                         # If both have the same profile (or both are None), update in place
-                        if existing_profile == target_profile:
+                        # Use explicit None comparison to handle both None and empty string cases
+                        if (existing_profile is None and target_profile is None) or (existing_profile == target_profile):
                             existing_entry = e
                             break
                 
