@@ -672,9 +672,42 @@ class Downloader:
         if debrid_file.download_url:
             from program.services.library_profile_matcher import LibraryProfileMatcher
 
-            # Match library profiles for this item
+            # Match library profiles for this item (for path generation)
             matcher = LibraryProfileMatcher()
             library_profiles = matcher.get_matching_profiles(item)
+            logger.debug(
+                f"Library profile matching for {item.log_string}: found {len(library_profiles)} profiles: {library_profiles}"
+            )
+
+            # Get ranking profiles from path_to_profile mapping
+            # This determines which ranking profiles (hq, mobile) should have entries
+            ranking_settings = settings_manager.settings.ranking
+            ranking_profiles_to_create = []
+            
+            # Get all unique profile names from path_profiles mapping
+            # This gives us all ranking profiles that are configured (e.g., hq, mobile)
+            if ranking_settings.path_profiles:
+                unique_profiles = set()
+                for mapping in ranking_settings.path_profiles:
+                    if mapping.profile_name:
+                        unique_profiles.add(mapping.profile_name)
+                ranking_profiles_to_create = list(unique_profiles)
+                logger.debug(
+                    f"Found {len(ranking_profiles_to_create)} ranking profiles from path_profiles: {ranking_profiles_to_create} for {item.log_string}"
+                )
+            
+            # If no ranking profiles found, fall back to using profile_name from stream
+            if not ranking_profiles_to_create:
+                if profile_name:
+                    ranking_profiles_to_create = [profile_name]
+                    logger.debug(
+                        f"No ranking profiles from path_profiles, using stream profile_name: {profile_name} for {item.log_string}"
+                    )
+                else:
+                    ranking_profiles_to_create = [None]
+                    logger.debug(
+                        f"No ranking profiles found and no profile_name from stream, creating entry without profile for {item.log_string}"
+                    )
 
             # Create MediaEntry with original_filename as source of truth
             # Path generation is now handled by RivenVFS during registration
@@ -687,18 +720,11 @@ class Downloader:
                 media_metadata = metadata.model_dump(mode="json")
 
             # Determine which profiles need entries
-            # If library_profiles is provided, create one entry per matching profile
-            # Otherwise, use the profile_name from the stream (if any)
-            profiles_to_create = []
-            if library_profiles and len(library_profiles) > 0:
-                # Create entries for all matching library profiles
-                profiles_to_create = library_profiles
-            elif profile_name:
-                # Fallback: use the profile_name from the stream
-                profiles_to_create = [profile_name]
-            else:
-                # No profiles specified, create one entry without profile_name
-                profiles_to_create = [None]
+            # Use ranking profiles (hq, mobile) instead of library_profiles
+            profiles_to_create = ranking_profiles_to_create
+            logger.debug(
+                f"Creating entries for {len(profiles_to_create)} ranking profiles: {profiles_to_create} for {item.log_string}"
+            )
 
             # Create or update entries for each profile
             for target_profile in profiles_to_create:
