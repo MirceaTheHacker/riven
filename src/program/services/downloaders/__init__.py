@@ -206,6 +206,7 @@ class Downloader:
                     try:
                         # Use pre-validated container if available (for hq profile size-based ranking)
                         stream_key = stream.infohash.lower()
+                        container = None
                         if stream_key in validated_containers:
                             container, validated_service = validated_containers[stream_key]
                             # Use the service that validated it
@@ -225,9 +226,30 @@ class Downloader:
                                 continue
 
                         # Try to download using this service
-                        download_result = self.download_cached_stream_on_service(
-                            stream, container, service
-                        )
+                        try:
+                            download_result = self.download_cached_stream_on_service(
+                                stream, container, service
+                            )
+                        except Exception as download_error:
+                            # If download fails and we used a pre-validated container, 
+                            # the torrent might have been deleted - re-validate
+                            if stream_key in validated_containers:
+                                logger.debug(
+                                    f"Pre-validated container failed for {stream.infohash[:8]}..., re-validating: {download_error}"
+                                )
+                                # Remove from validated containers and re-validate
+                                del validated_containers[stream_key]
+                                container = self.validate_stream_on_service(stream, item, service)
+                                if not container:
+                                    logger.debug(
+                                        f"Stream {stream.infohash} not available on {service.key} after re-validation"
+                                    )
+                                    continue
+                                download_result = self.download_cached_stream_on_service(
+                                    stream, container, service
+                                )
+                            else:
+                                raise
                         stream_profile = getattr(
                             stream, "profile_name", default_profile_name
                         )
@@ -247,24 +269,13 @@ class Downloader:
                             existing_infohashes.add(stream.infohash.lower())
                             new_downloads += 1
                             
-                            # Clean up unused validated torrents (for hq profile size-based ranking)
-                            # Remove the torrent we just used from cleanup list, then clean up the rest
+                            # Remove the torrent we successfully downloaded from cleanup list
+                            # (we'll clean up the rest at the end after processing all streams)
                             if unused_validated_torrents:
-                                # Remove the torrent we successfully downloaded
                                 unused_validated_torrents = [
                                     (s, tid, key) for s, tid, key in unused_validated_torrents
                                     if key != stream_key
                                 ]
-                                # Clean up the remaining unused torrents
-                                if unused_validated_torrents:
-                                    logger.debug(f"Cleaning up {len(unused_validated_torrents)} unused validated torrents for {item.log_string}")
-                                    for unused_service, unused_torrent_id, _ in unused_validated_torrents:
-                                        try:
-                                            unused_service.delete_torrent(unused_torrent_id)
-                                            logger.debug(f"Deleted unused validated torrent {unused_torrent_id} from {unused_service.key}")
-                                        except Exception as e:
-                                            logger.debug(f"Failed to delete unused validated torrent {unused_torrent_id}: {e}")
-                                    unused_validated_torrents.clear()  # Clear to avoid duplicate cleanup
                             
                             break
                         else:
@@ -326,9 +337,10 @@ class Downloader:
                 if tried_streams >= 3:
                     yield item
 
-            # Clean up any remaining unused validated torrents (if download didn't succeed)
+            # Clean up any remaining unused validated torrents after processing all streams
+            # This ensures we don't delete torrents that might be needed for other profiles (e.g., mobile)
             if unused_validated_torrents:
-                logger.debug(f"Cleaning up {len(unused_validated_torrents)} unused validated torrents for {item.log_string} (no successful download)")
+                logger.debug(f"Cleaning up {len(unused_validated_torrents)} unused validated torrents for {item.log_string} after processing all streams")
                 for unused_service, unused_torrent_id, _ in unused_validated_torrents:
                     try:
                         unused_service.delete_torrent(unused_torrent_id)
