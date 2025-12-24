@@ -31,6 +31,8 @@ class FilesystemService:
             logger.info(f"FilesystemService: Symlink library path configured: {self.symlink_library_path}")
         else:
             logger.debug("FilesystemService: Symlink library path not configured (RIVEN_SYMLINK_LIBRARY_PATH not set)")
+        # Cache for infohash -> file path mappings to avoid repeated searches
+        self._infohash_cache: dict[str, str] = {}
         self._initialize_rivenvfs(downloader)
 
     def _initialize_rivenvfs(self, downloader: Downloader):
@@ -155,8 +157,8 @@ class FilesystemService:
         """
         Find the actual file path in /mnt/debrid/riven/ for a given MediaEntry.
         
-        This searches for the file using the original_filename or infohash to match
-        against files in /mnt/debrid/riven/movies/ or /mnt/debrid/riven/__all__/.
+        Uses infohash-based lookup first (most reliable), then falls back to filename matching.
+        Maintains a cache of infohash -> file path mappings to avoid repeated searches.
         
         Returns the actual file path if found, None otherwise.
         """
@@ -167,7 +169,20 @@ class FilesystemService:
             logger.debug(f"_find_actual_file_path: No original_filename for entry")
             return None
         
-        logger.info(f"_find_actual_file_path: Searching for '{original_filename}' in /mnt/debrid/riven/")
+        # Strategy 1: Use infohash cache if available (fastest, most reliable)
+        if infohash:
+            infohash_lower = infohash.lower()
+            if infohash_lower in self._infohash_cache:
+                cached_path = self._infohash_cache[infohash_lower]
+                if os.path.exists(cached_path) and os.path.isfile(cached_path):
+                    logger.info(f"_find_actual_file_path: Found cached path for infohash {infohash_lower[:8]}...: {cached_path}")
+                    return cached_path
+                else:
+                    # Cache entry is stale, remove it
+                    logger.debug(f"_find_actual_file_path: Cached path no longer exists, removing from cache: {cached_path}")
+                    del self._infohash_cache[infohash_lower]
+        
+        logger.info(f"_find_actual_file_path: Searching for '{original_filename}' (infohash: {infohash[:8] if infohash else 'none'}...) in /mnt/debrid/riven/")
         
         # Search in /mnt/debrid/riven/movies/ and /mnt/debrid/riven/__all__/
         search_dirs = ["/mnt/debrid/riven/movies", "/mnt/debrid/riven/__all__"]
@@ -252,16 +267,28 @@ class FilesystemService:
                                 # Check if there's significant overlap (at least 2-3 key parts match)
                                 overlap = original_key_parts.intersection(file_key_parts)
                                 
-                                if (len(overlap) >= 2 or  # At least 2 key parts match
-                                    original_lower in file_basename or file_basename in original_lower or
-                                    base_name in file_basename or filename_no_ext in file_basename):
+                                # Stricter matching: require exact filename match OR high overlap (>=4 words) OR infohash match
+                                # This prevents false matches like "Witchfinder General" matching "American Psycho"
+                                file_matches = (
+                                    original_lower == file_basename or  # Exact match (best)
+                                    file_basename == original_lower or  # Reverse exact match
+                                    (len(overlap) >= 4 and infohash) or  # High overlap + infohash (very reliable)
+                                    (len(overlap) >= 5)  # Very high overlap even without infohash
+                                )
+                                
+                                if file_matches:
                                     if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                        logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts)")
+                                        # Cache the mapping if we have infohash
+                                        if infohash:
+                                            self._infohash_cache[infohash.lower()] = file_path
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts, cached for infohash {infohash[:8]}...)")
+                                        else:
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts)")
                                         return file_path
                                     else:
                                         logger.debug(f"Find found file but it's not accessible: {file_path}")
                                 else:
-                                    logger.debug(f"Find found file but verification failed: {file_path} (overlap: {len(overlap)}, original_key_parts: {original_key_parts}, file_key_parts: {file_key_parts})")
+                                    logger.debug(f"Find found file but verification failed: {file_path} (overlap: {len(overlap)}, requires >=4 with infohash or >=5 without)")
                             else:
                                 logger.debug(f"Find command returned no results for pattern *{search_pattern}*")
                                 continue  # Try next pattern
@@ -293,21 +320,24 @@ class FilesystemService:
                             file_words = set([w.lower() for w in file_lower.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
                             overlap = original_words.intersection(file_words)
                             
-                            # Check multiple matching strategies
+                            # Stricter matching: require exact match OR high overlap (>=4 words) OR infohash match
+                            # This prevents false matches like "Witchfinder General" matching "American Psycho"
                             matches = (
-                                original_lower == file_lower or  # Exact match
-                                original_lower in file_lower or   # Original contained in file
-                                file_lower in original_lower or    # File contained in original
-                                base_name in file_lower or         # Base name in file
-                                filename_no_ext in file_lower or   # Filename without ext in file
-                                file_lower == base_name or         # File equals base name
-                                len(overlap) >= 3  # At least 3 key words match (more flexible)
+                                original_lower == file_lower or  # Exact match (best)
+                                file_lower == original_lower or  # Reverse exact match
+                                (len(overlap) >= 4 and infohash) or  # High overlap + infohash (very reliable)
+                                (len(overlap) >= 5)  # Very high overlap even without infohash
                             )
                             
                             if matches:
                                 # Verify it's a regular file and readable
                                 if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                    logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file})")
+                                    # Cache the mapping if we have infohash
+                                    if infohash:
+                                        self._infohash_cache[infohash.lower()] = file_path
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file}, cached for infohash {infohash[:8]}...)")
+                                    else:
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (matched: {file})")
                                     return file_path
                             
                             # Limit search to avoid being too slow (increased limit)
