@@ -282,15 +282,36 @@ class Downloader:
         keep_versions: int,
         desired_hashes: Optional[list[str]] = None,
     ) -> None:
-        """Ensure only the top N filesystem entries are retained for the item."""
+        """
+        Ensure only the top N filesystem entries are retained per profile.
+        
+        This allows multiple entries with the same infohash if they have different profiles
+        (e.g., one for 'mobile' and one for 'hq'), but limits entries per profile to keep_versions.
+        """
         keep_versions = keep_versions if keep_versions and keep_versions > 0 else 1
         entries = list(getattr(item, "filesystem_entries", []))
         if not entries:
             return
 
-        entry_by_hash = {
-            getattr(entry, "infohash", "").lower(): entry for entry in entries
-        }
+        # Group entries by profile_name, then by infohash within each profile
+        from collections import defaultdict
+        entries_by_profile: dict[str | None, dict[str, list[MediaEntry]]] = defaultdict(lambda: defaultdict(list))
+        
+        for entry in entries:
+            # Extract profile_name from media_metadata
+            profile_name = None
+            if hasattr(entry, "media_metadata") and entry.media_metadata:
+                if isinstance(entry.media_metadata, dict):
+                    profile_name = entry.media_metadata.get("profile_name")
+                else:
+                    profile_name = getattr(entry.media_metadata, "profile_name", None)
+            
+            ih = getattr(entry, "infohash", "").lower()
+            if ih:
+                entries_by_profile[profile_name][ih].append(entry)
+            else:
+                # Entries without infohash go into a special group
+                entries_by_profile[profile_name][""].append(entry)
 
         if desired_hashes:
             ordered_hashes = [h.lower() for h in desired_hashes]
@@ -302,19 +323,36 @@ class Downloader:
                     ordered_hashes.append(ih)
 
         keep_list: list[MediaEntry] = []
-        for ih in ordered_hashes:
-            if ih in entry_by_hash and entry_by_hash[ih] not in keep_list:
-                keep_list.append(entry_by_hash[ih])
-            if len(keep_list) >= keep_versions:
-                break
-
-        # Fill remaining slots with any entries (e.g., legacy without infohash)
-        if len(keep_list) < keep_versions:
-            for entry in entries:
-                if entry not in keep_list:
-                    keep_list.append(entry)
-                if len(keep_list) >= keep_versions:
+        
+        # For each profile, keep up to keep_versions entries
+        for profile_name, profile_entries in entries_by_profile.items():
+            profile_keep_list: list[MediaEntry] = []
+            
+            # First, add entries for desired_hashes in order
+            for ih in ordered_hashes:
+                if ih in profile_entries:
+                    for entry in profile_entries[ih]:
+                        if entry not in profile_keep_list:
+                            profile_keep_list.append(entry)
+                        if len(profile_keep_list) >= keep_versions:
+                            break
+                if len(profile_keep_list) >= keep_versions:
                     break
+            
+            # Fill remaining slots for this profile with any other entries
+            if len(profile_keep_list) < keep_versions:
+                for ih, entry_list in profile_entries.items():
+                    if ih not in ordered_hashes:  # Skip already processed hashes
+                        for entry in entry_list:
+                            if entry not in profile_keep_list:
+                                profile_keep_list.append(entry)
+                            if len(profile_keep_list) >= keep_versions:
+                                break
+                    if len(profile_keep_list) >= keep_versions:
+                        break
+            
+            # Add all kept entries for this profile to the main keep_list
+            keep_list.extend(profile_keep_list)
 
         # Reorder/trim to keep list only
         item.filesystem_entries.clear()
@@ -667,17 +705,23 @@ class Downloader:
             # Populate library profiles
             entry.library_profiles = library_profiles
 
-            # If an entry with the same infohash exists, update it in place
-            existing_entry = next(
-                (
-                    e
-                    for e in item.filesystem_entries
-                    if getattr(e, "infohash", "").lower()
-                    == download_result.infohash.lower()
-                ),
-                None,
-            )
-
+            # If an entry with the same infohash AND profile_name exists, update it in place
+            # Otherwise, create a new entry (allows multiple entries per infohash for different profiles)
+            entry_profile = (media_metadata or {}).get("profile_name") if media_metadata else None
+            existing_entry = None
+            
+            for e in item.filesystem_entries:
+                if getattr(e, "infohash", "").lower() == download_result.infohash.lower():
+                    # Check if profile_name matches
+                    existing_profile = None
+                    if hasattr(e, "media_metadata") and e.media_metadata:
+                        existing_profile = e.media_metadata.get("profile_name") if isinstance(e.media_metadata, dict) else getattr(e.media_metadata, "profile_name", None)
+                    
+                    # If both have the same profile (or both are None), update in place
+                    if existing_profile == entry_profile:
+                        existing_entry = e
+                        break
+            
             if existing_entry:
                 existing_entry.original_filename = entry.original_filename
                 existing_entry.download_url = entry.download_url
