@@ -293,6 +293,39 @@ def _parse_results(
             torrents = sort_torrents(
                 torrents, bucket_limit=scraping_settings.bucket_limit
             )
+            
+            # For hq profile, re-sort by file size to prioritize larger files
+            # This helps select higher quality releases when multiple options are available
+            if profile_name == "hq":
+                # Get size information from W2P releases if available
+                aliases_dict = getattr(item, "aliases", {}) or {}
+                w2p_releases = aliases_dict.get("w2p_releases") or []
+                size_map = {
+                    rel.get("infohash", "").lower(): rel.get("size_bytes", 0)
+                    for rel in w2p_releases
+                    if rel.get("infohash") and rel.get("size_bytes")
+                }
+                
+                # Convert torrents dict to list for sorting
+                torrent_list = list(torrents.values())
+                
+                # Sort by size (larger first), then by existing RTN rank (higher first)
+                def sort_key(torrent: Torrent) -> tuple:
+                    # Get size from W2P releases if available, otherwise use 0
+                    size_bytes = size_map.get(torrent.infohash.lower(), 0)
+                    # Use negative size for descending order (larger files first)
+                    # RTN rank is already in the torrent object, we'll preserve relative order for same-size files
+                    return (-size_bytes, -getattr(torrent, 'rank', 0))
+                
+                torrent_list.sort(key=sort_key)
+                
+                # Rebuild the dict with sorted order
+                torrents = {t.infohash.lower(): t for t in torrent_list}
+                
+                if size_map:
+                    logger.debug(
+                        f"Re-sorted {len(torrent_list)} torrents by file size for {item.log_string} (hq profile)"
+                    )
 
             keep_versions = ranking_settings.get_keep_versions_for_profile(
                 profile_name

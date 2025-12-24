@@ -140,6 +140,55 @@ class Downloader:
             if not streams_to_process and len(existing_infohashes) >= keep_versions:
                 download_success = True
 
+            # For hq profile, validate top candidates and pick the largest one
+            # This ensures we get the highest quality release when multiple options are available
+            profile_name = getattr(streams_to_process[0], "profile_name", default_profile_name) if streams_to_process else default_profile_name
+            validated_containers = {}
+            unused_validated_torrents = []  # Track validated torrents we don't use, so we can clean them up
+            
+            if profile_name == "hq" and len(streams_to_process) > 1:
+                # Validate top 5 candidates to get their sizes
+                candidates_to_validate = streams_to_process[:5]
+                validated_candidates = []
+                
+                for candidate_stream in candidates_to_validate:
+                    for service in available_services:
+                        try:
+                            container = self.validate_stream_on_service(candidate_stream, item, service)
+                            if container and container.torrent_info and container.torrent_info.bytes:
+                                validated_candidates.append({
+                                    "stream": candidate_stream,
+                                    "container": container,
+                                    "service": service,
+                                    "size_bytes": container.torrent_info.bytes,
+                                    "torrent_id": container.torrent_id,
+                                })
+                                logger.debug(
+                                    f"Validated candidate for {item.log_string}: {candidate_stream.infohash[:8]}... size={container.torrent_info.size_mb:.2f}MB"
+                                )
+                                break  # Found on this service, move to next candidate
+                        except Exception as e:
+                            logger.debug(f"Failed to validate candidate {candidate_stream.infohash[:8]}...: {e}")
+                            continue
+                
+                # Sort by size (largest first)
+                if validated_candidates:
+                    validated_candidates.sort(key=lambda x: x["size_bytes"], reverse=True)
+                    logger.info(
+                        f"Re-ranked {len(validated_candidates)} candidates by size for {item.log_string} (hq profile). "
+                        f"Largest: {validated_candidates[0]['size_bytes'] / 1_000_000:.2f}MB, "
+                        f"Smallest: {validated_candidates[-1]['size_bytes'] / 1_000_000:.2f}MB"
+                    )
+                    # Replace streams_to_process with size-sorted candidates
+                    streams_to_process = [c["stream"] for c in validated_candidates] + streams_to_process[len(candidates_to_validate):]
+                    # Store validated containers for later use
+                    for c in validated_candidates:
+                        stream_key = c["stream"].infohash.lower()
+                        validated_containers[stream_key] = (c["container"], c["service"])
+                        # Track all validated torrents for potential cleanup (we'll remove the one we use)
+                        if c["torrent_id"]:
+                            unused_validated_torrents.append((c["service"], c["torrent_id"], stream_key))
+
             for stream in streams_to_process:
                 # Stop once we have keep_versions worth of distinct infohashes
                 if len(existing_infohashes) >= keep_versions:
@@ -155,15 +204,25 @@ class Downloader:
                     )
 
                     try:
-                        # Validate stream on this specific service
-                        container: Optional[TorrentContainer] = (
-                            self.validate_stream_on_service(stream, item, service)
-                        )
-                        if not container:
+                        # Use pre-validated container if available (for hq profile size-based ranking)
+                        stream_key = stream.infohash.lower()
+                        if stream_key in validated_containers:
+                            container, validated_service = validated_containers[stream_key]
+                            # Use the service that validated it
+                            service = validated_service
                             logger.debug(
-                                f"Stream {stream.infohash} not available on {service.key}"
+                                f"Using pre-validated container for {stream.infohash[:8]}... (size={container.torrent_info.size_mb:.2f}MB)"
                             )
-                            continue
+                        else:
+                            # Validate stream on this specific service
+                            container: Optional[TorrentContainer] = (
+                                self.validate_stream_on_service(stream, item, service)
+                            )
+                            if not container:
+                                logger.debug(
+                                    f"Stream {stream.infohash} not available on {service.key}"
+                                )
+                                continue
 
                         # Try to download using this service
                         download_result = self.download_cached_stream_on_service(
@@ -187,6 +246,26 @@ class Downloader:
                             stream_failed_on_all_services = False
                             existing_infohashes.add(stream.infohash.lower())
                             new_downloads += 1
+                            
+                            # Clean up unused validated torrents (for hq profile size-based ranking)
+                            # Remove the torrent we just used from cleanup list, then clean up the rest
+                            if unused_validated_torrents:
+                                # Remove the torrent we successfully downloaded
+                                unused_validated_torrents = [
+                                    (s, tid, key) for s, tid, key in unused_validated_torrents
+                                    if key != stream_key
+                                ]
+                                # Clean up the remaining unused torrents
+                                if unused_validated_torrents:
+                                    logger.debug(f"Cleaning up {len(unused_validated_torrents)} unused validated torrents for {item.log_string}")
+                                    for unused_service, unused_torrent_id, _ in unused_validated_torrents:
+                                        try:
+                                            unused_service.delete_torrent(unused_torrent_id)
+                                            logger.debug(f"Deleted unused validated torrent {unused_torrent_id} from {unused_service.key}")
+                                        except Exception as e:
+                                            logger.debug(f"Failed to delete unused validated torrent {unused_torrent_id}: {e}")
+                                    unused_validated_torrents.clear()  # Clear to avoid duplicate cleanup
+                            
                             break
                         else:
                             raise NoMatchingFilesException(
@@ -246,6 +325,16 @@ class Downloader:
                 tried_streams += 1
                 if tried_streams >= 3:
                     yield item
+
+            # Clean up any remaining unused validated torrents (if download didn't succeed)
+            if unused_validated_torrents:
+                logger.debug(f"Cleaning up {len(unused_validated_torrents)} unused validated torrents for {item.log_string} (no successful download)")
+                for unused_service, unused_torrent_id, _ in unused_validated_torrents:
+                    try:
+                        unused_service.delete_torrent(unused_torrent_id)
+                        logger.debug(f"Deleted unused validated torrent {unused_torrent_id} from {unused_service.key}")
+                    except Exception as e:
+                        logger.debug(f"Failed to delete unused validated torrent {unused_torrent_id}: {e}")
 
             # Final retention check after processing downloads
             self._enforce_version_retention(item, keep_versions, desired_hashes)
@@ -559,10 +648,11 @@ class Downloader:
                     )
                     continue
 
+                # Allow processing episodes in Downloaded state to support multiple versions (hq, mobile)
+                # Only skip episodes that are in final states (Completed, Symlinked)
                 if episode and episode.state not in [
                     States.Completed,
                     States.Symlinked,
-                    States.Downloaded,
                 ]:
                     # Skip if we've already processed this episode in this container
                     if (
@@ -679,47 +769,20 @@ class Downloader:
                 f"Library profile matching for {item.log_string}: found {len(library_profiles)} profiles: {library_profiles}"
             )
 
-            # Get ranking profiles from path_to_profile mapping
-            # This determines which ranking profiles (hq, mobile) should have entries
+            # Only create entries for the profile that actually matched this torrent
+            # This ensures we don't create duplicate entries pointing to the same file
+            # If you want multiple versions (hq and mobile), you need to find separate torrents for each profile
             ranking_profiles_to_create = []
-            try:
-                ranking_settings = settings_manager.settings.ranking
-                
-                # Get all unique profile names from path_profiles mapping
-                # This gives us all ranking profiles that are configured (e.g., hq, mobile)
-                if hasattr(ranking_settings, 'path_profiles') and ranking_settings.path_profiles:
-                    unique_profiles = set()
-                    for mapping in ranking_settings.path_profiles:
-                        # Handle both PathProfileMapping objects and dicts
-                        if hasattr(mapping, 'profile_name'):
-                            profile = mapping.profile_name
-                        elif isinstance(mapping, dict):
-                            profile = mapping.get('profile_name')
-                        else:
-                            continue
-                        if profile:
-                            unique_profiles.add(profile)
-                    ranking_profiles_to_create = list(unique_profiles)
-                    logger.info(
-                        f"Found {len(ranking_profiles_to_create)} ranking profiles from path_profiles: {ranking_profiles_to_create} for {item.log_string}"
-                    )
-            except Exception as e:
-                logger.warning(
-                    f"Error getting ranking profiles from path_profiles for {item.log_string}: {e}"
+            if profile_name:
+                ranking_profiles_to_create = [profile_name]
+                logger.info(
+                    f"Creating MediaEntry for profile '{profile_name}' that matched this torrent for {item.log_string}"
                 )
-            
-            # If no ranking profiles found, fall back to using profile_name from stream
-            if not ranking_profiles_to_create:
-                if profile_name:
-                    ranking_profiles_to_create = [profile_name]
-                    logger.debug(
-                        f"No ranking profiles from path_profiles, using stream profile_name: {profile_name} for {item.log_string}"
-                    )
-                else:
-                    ranking_profiles_to_create = [None]
-                    logger.debug(
-                        f"No ranking profiles found and no profile_name from stream, creating entry without profile for {item.log_string}"
-                    )
+            else:
+                ranking_profiles_to_create = [None]
+                logger.info(
+                    f"No profile_name from stream, creating entry without profile for {item.log_string}"
+                )
 
             # Create MediaEntry with original_filename as source of truth
             # Path generation is now handled by RivenVFS during registration
