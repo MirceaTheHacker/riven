@@ -171,13 +171,86 @@ class FilesystemService:
             return None
         
         # Strategy 1: Use infohash cache if available (fastest, most reliable)
+        # BUT: For multi-file torrents, verify the cached file matches the expected filename
+        # This prevents all episodes from pointing to the first episode's file
         if infohash:
             infohash_lower = infohash.lower()
+            expected_filename_lower = original_filename.lower()
+            
+            # First, try composite key (infohash:filename) for multi-file torrents
+            composite_key = f"{infohash_lower}:{expected_filename_lower}"
+            if composite_key in self._infohash_cache:
+                cached_path = self._infohash_cache[composite_key]
+                if os.path.exists(cached_path) and os.path.isfile(cached_path):
+                    logger.info(f"_find_actual_file_path: Found cached path for composite key {composite_key[:20]}...: {cached_path}")
+                    return cached_path
+                else:
+                    # Cache entry is stale, remove it
+                    logger.debug(f"_find_actual_file_path: Cached path no longer exists, removing composite key from cache: {cached_path}")
+                    del self._infohash_cache[composite_key]
+            
+            # Fallback to simple infohash key (for backward compatibility and single-file torrents)
             if infohash_lower in self._infohash_cache:
                 cached_path = self._infohash_cache[infohash_lower]
                 if os.path.exists(cached_path) and os.path.isfile(cached_path):
-                    logger.info(f"_find_actual_file_path: Found cached path for infohash {infohash_lower[:8]}...: {cached_path}")
-                    return cached_path
+                    # Verify the cached file matches the expected filename
+                    # This is critical for multi-file torrents (season packs, complete series packs)
+                    cached_filename = os.path.basename(cached_path).lower()
+                    expected_filename_lower = original_filename.lower()
+                    
+                    # Check if cached file matches expected filename
+                    if cached_filename == expected_filename_lower:
+                        logger.info(f"_find_actual_file_path: Found cached path for infohash {infohash_lower[:8]}...: {cached_path} (matches expected filename)")
+                        return cached_path
+                    else:
+                        # Cached file doesn't match - this is a multi-file torrent
+                        # Use the cached directory but search for the correct file within it
+                        cached_dir = os.path.dirname(cached_path)
+                        logger.debug(f"_find_actual_file_path: Cached file {cached_filename} doesn't match expected {expected_filename_lower}, searching in directory {cached_dir}")
+                        
+                        # Search within the cached directory for the correct file
+                        if os.path.isdir(cached_dir):
+                            try:
+                                # Try exact filename match first
+                                expected_path = os.path.join(cached_dir, original_filename)
+                                if os.path.exists(expected_path) and os.path.isfile(expected_path):
+                                    logger.info(f"_find_actual_file_path: Found matching file in cached directory: {expected_path}")
+                                    # Update cache with the correct file for this specific filename
+                                    # Use a composite key: infohash + filename to avoid conflicts
+                                    cache_key = f"{infohash_lower}:{expected_filename_lower}"
+                                    self._infohash_cache[cache_key] = expected_path
+                                    return expected_path
+                                
+                                # Try case-insensitive search within the directory
+                                for file in os.listdir(cached_dir):
+                                    file_path = os.path.join(cached_dir, file)
+                                    if os.path.isfile(file_path) and file.lower() == expected_filename_lower:
+                                        logger.info(f"_find_actual_file_path: Found matching file (case-insensitive) in cached directory: {file_path}")
+                                        cache_key = f"{infohash_lower}:{expected_filename_lower}"
+                                        self._infohash_cache[cache_key] = file_path
+                                        return file_path
+                                
+                                # Try partial match (for variations in naming)
+                                # Extract episode number from expected filename (e.g., S01E01, S01E02)
+                                import re
+                                episode_match = re.search(r's(\d+)e(\d+)', expected_filename_lower)
+                                if episode_match:
+                                    season_num = episode_match.group(1)
+                                    episode_num = episode_match.group(2)
+                                    pattern = f"s{season_num}e{episode_num}"
+                                    
+                                    for file in os.listdir(cached_dir):
+                                        file_path = os.path.join(cached_dir, file)
+                                        if os.path.isfile(file_path) and pattern in file.lower():
+                                            logger.info(f"_find_actual_file_path: Found matching file by episode pattern in cached directory: {file_path}")
+                                            cache_key = f"{infohash_lower}:{expected_filename_lower}"
+                                            self._infohash_cache[cache_key] = file_path
+                                            return file_path
+                            except Exception as e:
+                                logger.debug(f"_find_actual_file_path: Error searching cached directory: {e}")
+                        
+                        # If we couldn't find the file in the cached directory, fall through to normal search
+                        logger.debug(f"_find_actual_file_path: Could not find matching file in cached directory, falling back to normal search")
                 else:
                     # Cache entry is stale, remove it
                     logger.debug(f"_find_actual_file_path: Cached path no longer exists, removing from cache: {cached_path}")
@@ -291,9 +364,12 @@ class FilesystemService:
                                 if file_matches or loose_match:
                                     if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
                                         # Only cache EXACT matches to prevent wrong files from polluting the cache
+                                        # Use composite key (infohash:filename) for multi-file torrents
                                         if file_matches and infohash:
-                                            self._infohash_cache[infohash.lower()] = file_path
-                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match, cached for infohash {infohash[:8]}...)")
+                                            # Use composite key to avoid conflicts in multi-file torrents
+                                            cache_key = f"{infohash.lower()}:{original_lower}"
+                                            self._infohash_cache[cache_key] = file_path
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match, cached with composite key)")
                                         elif file_matches:
                                             logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match)")
                                         else:
@@ -352,9 +428,12 @@ class FilesystemService:
                                 # Verify it's a regular file and readable
                                 if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
                                     # Only cache EXACT matches to prevent wrong files from polluting the cache
+                                    # Use composite key (infohash:filename) for multi-file torrents
                                     if exact_match and infohash:
-                                        self._infohash_cache[infohash.lower()] = file_path
-                                        logger.info(f"Found actual file for {original_filename}: {file_path} (exact match: {file}, cached for infohash {infohash[:8]}...)")
+                                        # Use composite key to avoid conflicts in multi-file torrents
+                                        cache_key = f"{infohash.lower()}:{original_lower}"
+                                        self._infohash_cache[cache_key] = file_path
+                                        logger.info(f"Found actual file for {original_filename}: {file_path} (exact match: {file}, cached with composite key)")
                                     elif exact_match:
                                         logger.info(f"Found actual file for {original_filename}: {file_path} (exact match: {file})")
                                     else:
