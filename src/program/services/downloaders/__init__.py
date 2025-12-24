@@ -681,19 +681,31 @@ class Downloader:
 
             # Get ranking profiles from path_to_profile mapping
             # This determines which ranking profiles (hq, mobile) should have entries
-            ranking_settings = settings_manager.settings.ranking
             ranking_profiles_to_create = []
-            
-            # Get all unique profile names from path_profiles mapping
-            # This gives us all ranking profiles that are configured (e.g., hq, mobile)
-            if ranking_settings.path_profiles:
-                unique_profiles = set()
-                for mapping in ranking_settings.path_profiles:
-                    if mapping.profile_name:
-                        unique_profiles.add(mapping.profile_name)
-                ranking_profiles_to_create = list(unique_profiles)
-                logger.debug(
-                    f"Found {len(ranking_profiles_to_create)} ranking profiles from path_profiles: {ranking_profiles_to_create} for {item.log_string}"
+            try:
+                ranking_settings = settings_manager.settings.ranking
+                
+                # Get all unique profile names from path_profiles mapping
+                # This gives us all ranking profiles that are configured (e.g., hq, mobile)
+                if hasattr(ranking_settings, 'path_profiles') and ranking_settings.path_profiles:
+                    unique_profiles = set()
+                    for mapping in ranking_settings.path_profiles:
+                        # Handle both PathProfileMapping objects and dicts
+                        if hasattr(mapping, 'profile_name'):
+                            profile = mapping.profile_name
+                        elif isinstance(mapping, dict):
+                            profile = mapping.get('profile_name')
+                        else:
+                            continue
+                        if profile:
+                            unique_profiles.add(profile)
+                    ranking_profiles_to_create = list(unique_profiles)
+                    logger.info(
+                        f"Found {len(ranking_profiles_to_create)} ranking profiles from path_profiles: {ranking_profiles_to_create} for {item.log_string}"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Error getting ranking profiles from path_profiles for {item.log_string}: {e}"
                 )
             
             # If no ranking profiles found, fall back to using profile_name from stream
