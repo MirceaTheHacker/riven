@@ -106,8 +106,17 @@ class FilesystemService:
             logger.debug(f"Registered {episode_or_movie.log_string} with RivenVFS")
             
             # Create symlinks from VFS mount to symlink library path if configured
+            # Add a small delay after download to allow rclone mount to sync files
+            # This helps prevent issues where files aren't synced yet when we try to create symlinks
+            import time
+            time.sleep(1)  # Wait 1 second for rclone mount to sync
+            
             if self.symlink_library_path:
-                self._create_symlinks(episode_or_movie)
+                symlink_success, symlinks_created = self._create_symlinks(episode_or_movie)
+                if not symlink_success:
+                    logger.warning(f"Symlink creation partially or completely failed for {episode_or_movie.log_string} - item may need to be re-processed")
+                    # Don't fail the entire operation, but log the warning
+                    # The item will still be marked as Completed, but we'll add a periodic check
 
         logger.info(f"Filesystem processing complete for {item.log_string}")
 
@@ -274,13 +283,14 @@ class FilesystemService:
         filename_no_ext = os.path.splitext(os.path.basename(original_filename))[0].lower()
         
         # Try searching multiple times with increasing delays (files might not be synced to rclone mount immediately)
-        # Rclone mounts can take a few seconds to sync files after they're downloaded
-        max_retries = 3
+        # Rclone mounts can take several seconds to sync files after they're downloaded
+        # Increased retries and delays to handle slower rclone sync
+        max_retries = 5  # Increased from 3 to 5
         for retry in range(max_retries):
             if retry > 0:
                 import time
-                delay = retry * 2  # 2 seconds, 4 seconds, etc.
-                logger.debug(f"_find_actual_file_path: Retry {retry} after {delay}s delay (file might not be synced yet)")
+                delay = retry * 3  # 3 seconds, 6 seconds, 9 seconds, 12 seconds, 15 seconds
+                logger.debug(f"_find_actual_file_path: Retry {retry}/{max_retries} after {delay}s delay (file might not be synced yet)")
                 time.sleep(delay)  # Wait longer on each retry
             
             for search_dir in search_dirs:
@@ -515,18 +525,23 @@ class FilesystemService:
         logger.warning(f"_find_actual_file_path: No actual file found for {original_filename} after {max_retries} retries, will use VFS mount path")
         return None
 
-    def _create_symlinks(self, item: MediaItem):
+    def _create_symlinks(self, item: MediaItem) -> tuple[bool, int]:
         """
         Create symlinks from actual files in /mnt/debrid/riven/ to symlink library path.
         
         This creates symlinks pointing to the actual downloaded files instead of the VFS mount,
         which ensures Plex can properly access and scan the files.
+        
+        Returns:
+            tuple[bool, int]: (success, symlinks_created)
+                - success: True if all expected symlinks were created, False otherwise
+                - symlinks_created: Number of symlinks actually created
         """
         # Re-check environment variable in case it was set after initialization
         symlink_path = self.symlink_library_path or os.getenv("RIVEN_SYMLINK_LIBRARY_PATH")
         if not symlink_path:
             logger.debug(f"Symlink library path not configured, skipping symlink creation for {item.log_string}")
-            return
+            return (True, 0)  # Not an error if symlink path isn't configured
         
         # Update instance variable if it was just read from environment
         if not self.symlink_library_path and symlink_path:
@@ -537,7 +552,7 @@ class FilesystemService:
         # The VFS mount is optional - symlinks can point directly to /mnt/debrid/riven/ files
         if not self.riven_vfs:
             logger.debug("RivenVFS not initialized, skipping symlink creation")
-            return
+            return (True, 0)  # Not an error if VFS isn't initialized
         
         # If VFS is not mounted, we'll still create symlinks using actual file paths
         # (which are found via _find_actual_file_path)
@@ -549,12 +564,16 @@ class FilesystemService:
         entries = getattr(item, "filesystem_entries", None) or []
         if not entries:
             logger.debug(f"No filesystem entries for {item.log_string}, skipping symlink creation")
-            return
+            return (True, 0)  # Not an error if no entries
         
-        logger.debug(f"Creating symlinks for {item.log_string} with {len(entries)} filesystem entries, symlink path: {self.symlink_library_path}")
+        # Count expected symlinks (one per VFS path per entry)
+        expected_symlinks = sum(len(entry.get_all_vfs_paths()) for entry in entries)
+        
+        logger.debug(f"Creating symlinks for {item.log_string} with {len(entries)} filesystem entries ({expected_symlinks} expected symlinks), symlink path: {self.symlink_library_path}")
         
         mount_path = str(self.settings.mount_path)
         symlinks_created = 0
+        symlinks_failed = 0
         
         for entry in entries:
             try:
@@ -617,7 +636,8 @@ class FilesystemService:
                     
                     # Verify the source file exists and is readable
                     if not os.path.exists(source_path) or not os.access(source_path, os.R_OK):
-                        logger.warning(f"Source file does not exist or is not readable: {source_path}, skipping symlink")
+                        logger.warning(f"Source file does not exist or is not readable: {source_path}, skipping symlink for {item.log_string}")
+                        symlinks_failed += 1
                         continue
                     
                     # Build target path (in symlink library)
@@ -645,7 +665,8 @@ class FilesystemService:
                                     logger.warning(f"Failed to remove broken symlink {target_path}: {e}")
                                     continue
                             else:
-                                # Symlink already exists and is valid
+                                # Symlink already exists and is valid - count as created
+                                symlinks_created += 1
                                 continue
                         else:
                             # Path exists but is not a symlink - skip to avoid overwriting
@@ -659,11 +680,23 @@ class FilesystemService:
                         logger.debug(f"Created symlink: {target_path} -> {source_path}")
                     except OSError as e:
                         logger.warning(f"Failed to create symlink {target_path} -> {source_path}: {e}")
+                        symlinks_failed += 1
             except Exception as e:
                 logger.error(f"Error creating symlinks for {item.log_string}: {e}")
+                symlinks_failed += 1
+        
+        # Determine success: all expected symlinks were created (or already existed)
+        success = (symlinks_created + symlinks_failed) >= expected_symlinks and symlinks_failed == 0
         
         if symlinks_created > 0:
             logger.info(f"Created {symlinks_created} symlink(s) for {item.log_string}")
+        
+        if symlinks_failed > 0:
+            logger.warning(f"Failed to create {symlinks_failed} symlink(s) for {item.log_string} (expected {expected_symlinks}, created {symlinks_created}, failed {symlinks_failed})")
+        elif expected_symlinks > 0 and symlinks_created == 0:
+            logger.warning(f"No symlinks were created for {item.log_string} (expected {expected_symlinks})")
+        
+        return (success, symlinks_created)
 
     def _remove_symlinks(self, item: MediaItem):
         """
