@@ -686,55 +686,76 @@ class Downloader:
                 )
                 media_metadata = metadata.model_dump(mode="json")
 
-            # Tag the profile used for this download so naming can differentiate retained versions
-            if profile_name:
-                if not media_metadata:
-                    media_metadata = {}
-                media_metadata["profile_name"] = profile_name
-
-            entry = MediaEntry.create_virtual_entry(
-                original_filename=debrid_file.filename,
-                download_url=debrid_file.download_url,
-                provider=service.key,
-                provider_download_id=str(download_result.info.id),
-                file_size=debrid_file.filesize or 0,
-                media_metadata=media_metadata,
-                infohash=download_result.infohash.lower(),
-            )
-
-            # Populate library profiles
-            entry.library_profiles = library_profiles
-
-            # If an entry with the same infohash AND profile_name exists, update it in place
-            # Otherwise, create a new entry (allows multiple entries per infohash for different profiles)
-            entry_profile = (media_metadata or {}).get("profile_name") if media_metadata else None
-            existing_entry = None
-            
-            for e in item.filesystem_entries:
-                if getattr(e, "infohash", "").lower() == download_result.infohash.lower():
-                    # Check if profile_name matches
-                    existing_profile = None
-                    if hasattr(e, "media_metadata") and e.media_metadata:
-                        existing_profile = e.media_metadata.get("profile_name") if isinstance(e.media_metadata, dict) else getattr(e.media_metadata, "profile_name", None)
-                    
-                    # If both have the same profile (or both are None), update in place
-                    if existing_profile == entry_profile:
-                        existing_entry = e
-                        break
-            
-            if existing_entry:
-                existing_entry.original_filename = entry.original_filename
-                existing_entry.download_url = entry.download_url
-                existing_entry.unrestricted_url = entry.unrestricted_url
-                existing_entry.provider = entry.provider
-                existing_entry.provider_download_id = entry.provider_download_id
-                existing_entry.file_size = entry.file_size
-                existing_entry.media_metadata = entry.media_metadata
-                existing_entry.library_profiles = entry.library_profiles
-                existing_entry.infohash = entry.infohash
-                entry = existing_entry
+            # Determine which profiles need entries
+            # If library_profiles is provided, create one entry per matching profile
+            # Otherwise, use the profile_name from the stream (if any)
+            profiles_to_create = []
+            if library_profiles and len(library_profiles) > 0:
+                # Create entries for all matching library profiles
+                profiles_to_create = library_profiles
+            elif profile_name:
+                # Fallback: use the profile_name from the stream
+                profiles_to_create = [profile_name]
             else:
-                item.filesystem_entries.append(entry)
+                # No profiles specified, create one entry without profile_name
+                profiles_to_create = [None]
+
+            # Create or update entries for each profile
+            for target_profile in profiles_to_create:
+                # Create a copy of the entry metadata with the target profile
+                entry_metadata = media_metadata.copy() if media_metadata else {}
+                if target_profile:
+                    entry_metadata["profile_name"] = target_profile
+                elif "profile_name" in entry_metadata:
+                    # Remove profile_name if target_profile is None
+                    entry_metadata.pop("profile_name", None)
+
+                # Create entry with this profile
+                profile_entry = MediaEntry.create_virtual_entry(
+                    original_filename=debrid_file.filename,
+                    download_url=debrid_file.download_url,
+                    provider=service.key,
+                    provider_download_id=str(download_result.info.id),
+                    file_size=debrid_file.filesize or 0,
+                    media_metadata=entry_metadata,
+                    infohash=download_result.infohash.lower(),
+                )
+                profile_entry.library_profiles = library_profiles
+
+                # Check if an entry with the same infohash AND profile_name already exists
+                existing_entry = None
+                for e in item.filesystem_entries:
+                    if getattr(e, "infohash", "").lower() == download_result.infohash.lower():
+                        # Check if profile_name matches
+                        existing_profile = None
+                        if hasattr(e, "media_metadata") and e.media_metadata:
+                            existing_profile = e.media_metadata.get("profile_name") if isinstance(e.media_metadata, dict) else getattr(e.media_metadata, "profile_name", None)
+                        
+                        # If both have the same profile (or both are None), update in place
+                        if existing_profile == target_profile:
+                            existing_entry = e
+                            break
+                
+                if existing_entry:
+                    # Update existing entry
+                    existing_entry.original_filename = profile_entry.original_filename
+                    existing_entry.download_url = profile_entry.download_url
+                    existing_entry.unrestricted_url = profile_entry.unrestricted_url
+                    existing_entry.provider = profile_entry.provider
+                    existing_entry.provider_download_id = profile_entry.provider_download_id
+                    existing_entry.file_size = profile_entry.file_size
+                    existing_entry.media_metadata = profile_entry.media_metadata
+                    existing_entry.library_profiles = profile_entry.library_profiles
+                    existing_entry.infohash = profile_entry.infohash
+                    logger.debug(
+                        f"Updated MediaEntry for {item.log_string} with profile_name={target_profile}"
+                    )
+                else:
+                    # Create new entry
+                    item.filesystem_entries.append(profile_entry)
+                    logger.debug(
+                        f"Created MediaEntry for {item.log_string} with profile_name={target_profile}"
+                    )
 
             # Enforce retention after adding/updating
             self._enforce_version_retention(item, keep_versions)
