@@ -164,30 +164,88 @@ class FilesystemService:
         infohash = getattr(entry, "infohash", None)
         
         if not original_filename:
+            logger.debug(f"_find_actual_file_path: No original_filename for entry")
             return None
+        
+        logger.info(f"_find_actual_file_path: Searching for '{original_filename}' in /mnt/debrid/riven/")
         
         # Search in /mnt/debrid/riven/movies/ and /mnt/debrid/riven/__all__/
         search_dirs = ["/mnt/debrid/riven/movies", "/mnt/debrid/riven/__all__"]
         
+        # Extract key parts from original filename for matching
+        original_lower = original_filename.lower()
+        # Get base filename without extension for matching
+        base_name = os.path.splitext(original_filename)[0].lower()
+        # Also try without the extension in the search
+        filename_no_ext = os.path.splitext(os.path.basename(original_filename))[0].lower()
+        
         for search_dir in search_dirs:
             if not os.path.exists(search_dir):
+                logger.debug(f"_find_actual_file_path: Search directory does not exist: {search_dir}")
                 continue
             
             try:
-                # Search for files matching the original filename
+                # First, try using find command for faster searching (much faster than os.walk)
+                import subprocess
+                try:
+                    # Escape the filename for shell safety and search
+                    safe_pattern = original_filename.replace('[', '\\[').replace(']', '\\]')
+                    find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{safe_pattern}*', '-print', '-quit']
+                    result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=3)
+                    
+                    if result.returncode == 0 and result.stdout.strip():
+                        file_path = result.stdout.strip()
+                        if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
+                            logger.info(f"Found actual file via find command for {original_filename}: {file_path}")
+                            return file_path
+                except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+                    logger.debug(f"find command failed or not available, using os.walk: {e}")
+                
+                # Fallback to os.walk if find doesn't work
+                files_checked = 0
                 for root, dirs, files in os.walk(search_dir):
+                    # Limit search depth to avoid going too deep
+                    if root.count(os.sep) > search_dir.count(os.sep) + 2:
+                        dirs[:] = []  # Don't recurse deeper
+                        continue
+                    
                     for file in files:
+                        files_checked += 1
                         file_path = os.path.join(root, file)
-                        # Match by original filename (case-insensitive, partial match)
-                        if original_filename.lower() in file.lower() or file.lower() in original_filename.lower():
+                        file_lower = file.lower()
+                        
+                        # Match by original filename (case-insensitive)
+                        # Check multiple matching strategies
+                        file_basename = os.path.basename(file_path).lower()
+                        matches = (
+                            original_lower in file_lower or 
+                            file_lower in original_lower or
+                            base_name in file_lower or
+                            filename_no_ext in file_basename or
+                            file_basename == original_lower or
+                            file_basename == base_name
+                        )
+                        
+                        if matches:
                             # Verify it's a regular file and readable
                             if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                logger.debug(f"Found actual file for {original_filename}: {file_path}")
+                                logger.info(f"Found actual file for {original_filename}: {file_path}")
                                 return file_path
+                        
+                        # Limit search to avoid being too slow (increased limit)
+                        if files_checked > 2000:
+                            logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, stopping search to avoid timeout")
+                            break
+                    
+                    if files_checked > 2000:
+                        break
+                
+                logger.debug(f"_find_actual_file_path: Searched {files_checked} files in {search_dir}, no match found")
             except Exception as e:
-                logger.debug(f"Error searching {search_dir} for {original_filename}: {e}")
+                logger.warning(f"Error searching {search_dir} for {original_filename}: {e}")
                 continue
         
+        logger.debug(f"_find_actual_file_path: No actual file found for {original_filename}, will use VFS mount path")
         return None
 
     def _create_symlinks(self, item: MediaItem):
@@ -238,9 +296,10 @@ class FilesystemService:
                     if actual_file_path:
                         # Use the actual file path instead of VFS mount
                         source_path = actual_file_path
-                        logger.debug(f"Using actual file path for symlink: {source_path}")
+                        logger.info(f"Using actual file path for symlink: {source_path} (instead of VFS mount)")
                     else:
                         # Fallback to VFS mount path
+                        logger.warning(f"Could not find actual file path for {getattr(entry, 'original_filename', 'unknown')}, falling back to VFS mount - Plex may not be able to access this file")
                         source_path = os.path.join(mount_path, vfs_path.lstrip("/"))
                         
                         # Verify the source file actually exists in the VFS
