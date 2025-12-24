@@ -304,65 +304,102 @@ class FilesystemService:
                         
                         # Try multiple pattern strategies
                         patterns_to_try = []
+                        import re
                         
-                        # Strategy 1: Use first 3-4 significant words (more flexible)
-                        if len(significant_words) >= 3:
-                            patterns_to_try.append('*'.join(significant_words[:4]))
+                        # Extract episode/season info for stricter matching
+                        episode_match = re.search(r's(\d+)e(\d+)', base_name_no_ext.lower())
+                        season_episode_pattern = None
+                        if episode_match:
+                            season_episode_pattern = f"s{episode_match.group(1)}e{episode_match.group(2)}"
                         
-                        # Strategy 2: Use the original filename base (for exact matches)
-                        # Remove extension and use first part before any dots
+                        # Strategy 1: Use exact filename (best match)
+                        patterns_to_try.append(original_filename)
+                        
+                        # Strategy 2: Use base filename without extension
+                        patterns_to_try.append(base_name_no_ext)
+                        
+                        # Strategy 3: For episodes, combine show name + season/episode (most reliable)
+                        # e.g., "Planet*Earth*II*S01E01" or "Planet*S01E01"
+                        if season_episode_pattern:
+                            # Try with full show name
+                            if len(significant_words) >= 2:
+                                # "Planet*Earth*II*S01E01" or "Planet*Earth*S01E01"
+                                show_ep_pattern = '*'.join(significant_words[:3] + [season_episode_pattern])
+                                patterns_to_try.append(show_ep_pattern)
+                            # Try with just first word + episode
+                            if significant_words:
+                                patterns_to_try.append(f"{significant_words[0]}*{season_episode_pattern}")
+                            # Just the episode pattern
+                            patterns_to_try.append(season_episode_pattern)
+                        
+                        # Strategy 4: Use first part of filename (before first dot)
                         first_part = base_name_no_ext.split('.')[0] if '.' in base_name_no_ext else base_name_no_ext
-                        if len(first_part) > 5:
+                        if len(first_part) > 3:
                             patterns_to_try.append(first_part)
                         
-                        # Strategy 3: Use first 2 significant words + year if present (only if year not already in first 2 words)
-                        import re
-                        year_match = re.search(r'\b(19|20)\d{2}\b', base_name_no_ext)
-                        if year_match and len(significant_words) >= 2:
-                            year = year_match.group(0)
-                            # Only add year if it's not already in the first 2 words
-                            if year not in significant_words[:2]:
-                                patterns_to_try.append('*'.join(significant_words[:2] + [year]))
-                            else:
-                                # Year is already in the pattern, just use first 2 words
-                                patterns_to_try.append('*'.join(significant_words[:2]))
+                        # Strategy 5: Use first 2-3 significant words (more flexible for subdirectory searches)
+                        if len(significant_words) >= 2:
+                            patterns_to_try.append('*'.join(significant_words[:3]))
+                        
+                        # Strategy 6: Use just the first significant word (most flexible)
+                        if significant_words:
+                            patterns_to_try.append(significant_words[0])
                         
                         # Try each pattern until one works
                         for search_pattern in patterns_to_try:
-                            find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{search_pattern}*', '-print', '-quit']
+                            # Use -name instead of -iname for case-sensitive, and search recursively
+                            find_cmd = ['find', search_dir, '-type', 'f', '-iname', f'*{search_pattern}*']
                             logger.debug(f"Trying find command with pattern: *{search_pattern}* in {search_dir}")
-                            result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=5)
+                            result = subprocess.run(find_cmd, capture_output=True, text=True, timeout=10)
                             
-                            logger.debug(f"Find command result: returncode={result.returncode}, stdout={result.stdout.strip()[:100] if result.stdout else 'empty'}, stderr={result.stderr.strip()[:100] if result.stderr else 'empty'}")
+                            logger.debug(f"Find command result: returncode={result.returncode}, found {len(result.stdout.strip().split()) if result.stdout.strip() else 0} files")
                             
                             if result.returncode == 0 and result.stdout.strip():
-                                file_path = result.stdout.strip()
-                                # Verify the file matches the original filename
-                                file_basename = os.path.basename(file_path).lower()
-                                # More flexible matching - check if key parts match
-                                # Extract key identifiers from both filenames
-                                original_key_parts = set([w.lower() for w in significant_words[:5]])
-                                file_key_parts = set([w.lower() for w in file_basename.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
-                                # Check if there's significant overlap (at least 2-3 key parts match)
-                                overlap = original_key_parts.intersection(file_key_parts)
+                                # Check all found files, not just the first one
+                                found_files = [f.strip() for f in result.stdout.strip().split('\n') if f.strip()]
                                 
-                                # Stricter matching: require exact filename match OR very high overlap (>=5 words) OR exact base name match
-                                # Only cache EXACT matches to prevent wrong files from being cached
-                                # This prevents false matches like "Witchfinder General" matching "American Psycho"
-                                # or "The Blacklist S01E01" matching "Bad Boys for Life"
-                                file_matches = (
-                                    original_lower == file_basename or  # Exact match (best)
-                                    file_basename == original_lower or  # Reverse exact match
-                                    base_name == file_basename or  # Base name exact match
-                                    filename_no_ext == file_basename  # Filename without ext exact match
-                                )
-                                
-                                # For non-exact matches, require VERY high overlap (>=6 words) to prevent false positives
-                                # And do NOT cache these - only cache exact matches
-                                loose_match = len(overlap) >= 6
-                                
-                                if file_matches or loose_match:
-                                    if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
+                                for file_path in found_files:
+                                    if not os.path.isfile(file_path) or not os.access(file_path, os.R_OK):
+                                        continue
+                                    
+                                    # Verify the file matches the original filename
+                                    file_basename = os.path.basename(file_path).lower()
+                                    
+                                    # Extract key identifiers from both filenames
+                                    original_key_parts = set([w.lower() for w in significant_words[:8]])
+                                    file_key_parts = set([w.lower() for w in file_basename.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
+                                    overlap = original_key_parts.intersection(file_key_parts)
+                                    
+                                    # Stricter matching: require exact filename match OR exact base name match
+                                    file_matches = (
+                                        original_lower == file_basename or  # Exact match (best)
+                                        file_basename == original_lower or  # Reverse exact match
+                                        base_name == file_basename or  # Base name exact match
+                                        filename_no_ext == file_basename  # Filename without ext exact match
+                                    )
+                                    
+                                    # For non-exact matches, require:
+                                    # 1. Episode/season numbers MUST match if present
+                                    # 2. Very high overlap (>=7 words) AND title words must match
+                                    loose_match = False
+                                    title_overlap_count = 0
+                                    if not file_matches and season_episode_pattern:
+                                        # For episodes, require season/episode pattern to match
+                                        if season_episode_pattern in file_basename:
+                                            # Also require title words to match (first 2-3 significant words, excluding quality words)
+                                            quality_words = {'s01', 's02', 'e01', 'e02', '2160p', '1080p', '720p', '4k', 'uhd', 'hdr', 'bluray', 'x265', 'hevc', '10bit', 'aac', 'mkv', 'mp4', 'web', 'dl', 'rip'}
+                                            title_words = [w for w in significant_words if w.lower() not in quality_words]
+                                            file_title_words = [w for w in file_key_parts if w.lower() not in quality_words]
+                                            title_overlap = set(title_words[:3]).intersection(set(file_title_words[:3]))
+                                            title_overlap_count = len(title_overlap)
+                                            # Require at least 2 title words to match AND high overall overlap
+                                            if title_overlap_count >= 2 and len(overlap) >= 7:
+                                                loose_match = True
+                                    elif not file_matches:
+                                        # For movies, require very high overlap (>=8 words) to prevent false positives
+                                        loose_match = len(overlap) >= 8
+                                    
+                                    if file_matches or loose_match:
                                         # Only cache EXACT matches to prevent wrong files from polluting the cache
                                         # Use composite key (infohash:filename) for multi-file torrents
                                         if file_matches and infohash:
@@ -373,12 +410,11 @@ class FilesystemService:
                                         elif file_matches:
                                             logger.info(f"Found actual file via find command for {original_filename}: {file_path} (exact match)")
                                         else:
-                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (loose match {len(overlap)} words, NOT cached)")
+                                            logger.info(f"Found actual file via find command for {original_filename}: {file_path} (loose match: {len(overlap)} words, {title_overlap_count} title words, NOT cached)")
                                         return file_path
-                                    else:
-                                        logger.debug(f"Find found file but it's not accessible: {file_path}")
-                                else:
-                                    logger.debug(f"Find found file but verification failed: {file_path} (overlap: {len(overlap)}, requires >=4 with infohash or >=5 without)")
+                                
+                                # If we checked all files and none matched, continue to next pattern
+                                logger.debug(f"Find found {len(found_files)} files but none matched verification")
                             else:
                                 logger.debug(f"Find command returned no results for pattern *{search_pattern}*")
                                 continue  # Try next pattern
@@ -410,7 +446,7 @@ class FilesystemService:
                             file_words = set([w.lower() for w in file_lower.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
                             overlap = original_words.intersection(file_words)
                             
-                            # Stricter matching: require exact match OR very high overlap (>=6 words)
+                            # Stricter matching: require exact match OR very high overlap with episode/season verification
                             # Only cache EXACT matches to prevent wrong files from being cached
                             # This prevents false matches like "Witchfinder General" matching "American Psycho"
                             # or "The Blacklist S01E01" matching "Bad Boys for Life"
@@ -421,8 +457,28 @@ class FilesystemService:
                                 filename_no_ext == file_lower  # Filename without ext exact match
                             )
                             
-                            # For non-exact matches, require VERY high overlap (>=6 words) to prevent false positives
-                            loose_match = len(overlap) >= 6
+                            # For non-exact matches, require:
+                            # 1. Episode/season numbers MUST match if present
+                            # 2. Very high overlap (>=7 words for episodes, >=8 for movies) AND title words must match
+                            loose_match = False
+                            if not exact_match:
+                                import re
+                                episode_match = re.search(r's(\d+)e(\d+)', original_lower)
+                                if episode_match:
+                                    # For episodes, require season/episode pattern to match
+                                    season_episode_pattern = f"s{episode_match.group(1)}e{episode_match.group(2)}"
+                                    if season_episode_pattern in file_lower:
+                                        # Also require title words to match (first 2-3 significant words, excluding quality words)
+                                        quality_words = {'s01', 's02', 'e01', 'e02', '2160p', '1080p', '720p', '4k', 'uhd', 'hdr', 'bluray', 'x265', 'hevc', '10bit', 'aac', 'mkv', 'mp4', 'web', 'dl', 'rip'}
+                                        title_words = [w for w in significant_words if w.lower() not in quality_words]
+                                        file_title_words = [w for w in file_words if w.lower() not in quality_words]
+                                        title_overlap = set(title_words[:3]).intersection(set(file_title_words[:3]))
+                                        # Require at least 2 title words to match AND high overall overlap
+                                        if len(title_overlap) >= 2 and len(overlap) >= 7:
+                                            loose_match = True
+                                else:
+                                    # For movies, require very high overlap (>=8 words) to prevent false positives
+                                    loose_match = len(overlap) >= 8
                             
                             if exact_match or loose_match:
                                 # Verify it's a regular file and readable
