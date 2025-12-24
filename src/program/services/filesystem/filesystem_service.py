@@ -179,13 +179,15 @@ class FilesystemService:
         # Also try without the extension in the search
         filename_no_ext = os.path.splitext(os.path.basename(original_filename))[0].lower()
         
-        # Try searching multiple times with a small delay (files might not be synced to rclone mount immediately)
-        max_retries = 2
+        # Try searching multiple times with increasing delays (files might not be synced to rclone mount immediately)
+        # Rclone mounts can take a few seconds to sync files after they're downloaded
+        max_retries = 3
         for retry in range(max_retries):
             if retry > 0:
                 import time
-                logger.debug(f"_find_actual_file_path: Retry {retry} after brief delay (file might not be synced yet)")
-                time.sleep(1)  # Wait 1 second before retry
+                delay = retry * 2  # 2 seconds, 4 seconds, etc.
+                logger.debug(f"_find_actual_file_path: Retry {retry} after {delay}s delay (file might not be synced yet)")
+                time.sleep(delay)  # Wait longer on each retry
             
             for search_dir in search_dirs:
                 if not os.path.exists(search_dir):
@@ -219,12 +221,17 @@ class FilesystemService:
                         if len(first_part) > 5:
                             patterns_to_try.append(first_part)
                         
-                        # Strategy 3: Use first 2 significant words + year if present
+                        # Strategy 3: Use first 2 significant words + year if present (only if year not already in first 2 words)
                         import re
                         year_match = re.search(r'\b(19|20)\d{2}\b', base_name_no_ext)
                         if year_match and len(significant_words) >= 2:
                             year = year_match.group(0)
-                            patterns_to_try.append('*'.join(significant_words[:2] + [year]))
+                            # Only add year if it's not already in the first 2 words
+                            if year not in significant_words[:2]:
+                                patterns_to_try.append('*'.join(significant_words[:2] + [year]))
+                            else:
+                                # Year is already in the pattern, just use first 2 words
+                                patterns_to_try.append('*'.join(significant_words[:2]))
                         
                         # Try each pattern until one works
                         for search_pattern in patterns_to_try:
@@ -238,13 +245,23 @@ class FilesystemService:
                                 file_path = result.stdout.strip()
                                 # Verify the file matches the original filename
                                 file_basename = os.path.basename(file_path).lower()
-                                if (original_lower in file_basename or file_basename in original_lower or
+                                # More flexible matching - check if key parts match
+                                # Extract key identifiers from both filenames
+                                original_key_parts = set([w.lower() for w in significant_words[:5]])
+                                file_key_parts = set([w.lower() for w in file_basename.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
+                                # Check if there's significant overlap (at least 2-3 key parts match)
+                                overlap = original_key_parts.intersection(file_key_parts)
+                                
+                                if (len(overlap) >= 2 or  # At least 2 key parts match
+                                    original_lower in file_basename or file_basename in original_lower or
                                     base_name in file_basename or filename_no_ext in file_basename):
                                     if os.path.isfile(file_path) and os.access(file_path, os.R_OK):
-                                        logger.info(f"Found actual file via find command for {original_filename}: {file_path}")
+                                        logger.info(f"Found actual file via find command for {original_filename}: {file_path} (matched {len(overlap)} key parts)")
                                         return file_path
                                     else:
                                         logger.debug(f"Find found file but it's not accessible: {file_path}")
+                                else:
+                                    logger.debug(f"Find found file but verification failed: {file_path} (overlap: {len(overlap)}, original_key_parts: {original_key_parts}, file_key_parts: {file_key_parts})")
                             else:
                                 logger.debug(f"Find command returned no results for pattern *{search_pattern}*")
                                 continue  # Try next pattern
@@ -271,14 +288,20 @@ class FilesystemService:
                             file_basename = file_lower  # Same thing for files in the loop
                             
                             # Match by original filename (case-insensitive)
-                            # Check multiple matching strategies - compare filename to filename
+                            # Extract key parts from both for flexible matching
+                            original_words = set([w.lower() for w in original_lower.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
+                            file_words = set([w.lower() for w in file_lower.replace('.', ' ').replace('-', ' ').replace('_', ' ').split() if len(w) > 2])
+                            overlap = original_words.intersection(file_words)
+                            
+                            # Check multiple matching strategies
                             matches = (
                                 original_lower == file_lower or  # Exact match
                                 original_lower in file_lower or   # Original contained in file
                                 file_lower in original_lower or    # File contained in original
                                 base_name in file_lower or         # Base name in file
                                 filename_no_ext in file_lower or   # Filename without ext in file
-                                file_lower == base_name            # File equals base name
+                                file_lower == base_name or         # File equals base name
+                                len(overlap) >= 3  # At least 3 key words match (more flexible)
                             )
                             
                             if matches:
