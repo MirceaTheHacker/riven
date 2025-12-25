@@ -293,30 +293,28 @@ class PlexWatchlist:
                     if not item.get("title") and hasattr(existing_item, "title") and existing_item.title:
                         item["title"] = existing_item.title
                     
-                    # Skip W2P call if item is already completed with streams
+                    # Check item state and W2P releases
                     item_state = existing_item.state
-                    has_streams = hasattr(existing_item, "streams") and len(getattr(existing_item, "streams", [])) > 0
                     is_completed = item_state == States.Completed
-                    
-                    if is_completed and has_streams:
-                        logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with streams, no need to refresh from W2P")
-                        continue
                     
                     # Check if item already has W2P releases stored
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
                     
+                    # Skip ALL completed items that have W2P releases (they've already been processed)
+                    # This prevents infinite loops where completed items are refreshed every 60 seconds
+                    if is_completed and w2p_releases:
+                        logger.info(f"⏭️  Skipping {item.get('title', 'unknown')} - already completed with {len(w2p_releases)} W2P releases, no need to refresh from W2P")
+                        continue
+                    
                     # Skip items that have W2P releases and are in a processing state (not completed)
                     # This prevents loops where items are reset to Indexed and then immediately re-harvested
                     if w2p_releases and not is_completed:
-                        logger.debug(f"Skipping {item.get('title', 'unknown')} - has {len(w2p_releases)} W2P releases and is in {item_state} state (being processed), will not refresh")
+                        logger.info(f"⏭️  Skipping {item.get('title', 'unknown')} - has {len(w2p_releases)} W2P releases and is in {item_state} state (being processed), will not refresh")
                         continue
                     
-                    # Log why we're including the item
-                    if w2p_releases:
-                        logger.debug(f"Including {item.get('title', 'unknown')} - exists with {len(w2p_releases)} W2P releases, will refresh from W2P (item is completed, checking for better quality)")
-                    else:
-                        logger.debug(f"Including {item.get('title', 'unknown')} - exists in database but has no W2P releases (will check for better quality)")
+                    # Log why we're including the item (with detailed state info)
+                    logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}, is_completed={is_completed}")
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
