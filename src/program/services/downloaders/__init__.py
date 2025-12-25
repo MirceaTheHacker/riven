@@ -156,28 +156,40 @@ class Downloader:
                         try:
                             container = self.validate_stream_on_service(candidate_stream, item, service)
                             if container and container.torrent_info and container.torrent_info.bytes:
+                                # Calculate median file size instead of total size
+                                # This ensures multi-season bundles are compared fairly
+                                median_file_size = self._calculate_median_file_size(container)
+                                
                                 validated_candidates.append({
                                     "stream": candidate_stream,
                                     "container": container,
                                     "service": service,
-                                    "size_bytes": container.torrent_info.bytes,
+                                    "size_bytes": container.torrent_info.bytes,  # Keep total for logging
+                                    "median_file_size": median_file_size,  # Use median for ranking
+                                    "file_count": len(container.files) if container.files else 0,
                                     "torrent_id": container.torrent_id,
                                 })
                                 logger.debug(
-                                    f"Validated candidate for {item.log_string}: {candidate_stream.infohash[:8]}... size={container.torrent_info.size_mb:.2f}MB"
+                                    f"Validated candidate for {item.log_string}: {candidate_stream.infohash[:8]}... "
+                                    f"total={container.torrent_info.size_mb:.2f}MB, "
+                                    f"median_file={median_file_size / 1_000_000:.2f}MB, "
+                                    f"files={len(container.files) if container.files else 0}"
                                 )
                                 break  # Found on this service, move to next candidate
                         except Exception as e:
                             logger.debug(f"Failed to validate candidate {candidate_stream.infohash[:8]}...: {e}")
                             continue
                 
-                # Sort by size (largest first)
+                # Sort by median file size (largest first) instead of total size
+                # This ensures multi-season bundles are compared fairly with single-season bundles
                 if validated_candidates:
-                    validated_candidates.sort(key=lambda x: x["size_bytes"], reverse=True)
+                    validated_candidates.sort(key=lambda x: x["median_file_size"], reverse=True)
                     logger.info(
-                        f"Re-ranked {len(validated_candidates)} candidates by size for {item.log_string} (hq profile). "
-                        f"Largest: {validated_candidates[0]['size_bytes'] / 1_000_000:.2f}MB, "
-                        f"Smallest: {validated_candidates[-1]['size_bytes'] / 1_000_000:.2f}MB"
+                        f"Re-ranked {len(validated_candidates)} candidates by median file size for {item.log_string} (hq profile). "
+                        f"Largest median: {validated_candidates[0]['median_file_size'] / 1_000_000:.2f}MB "
+                        f"({validated_candidates[0]['file_count']} files, total={validated_candidates[0]['size_bytes'] / 1_000_000:.2f}MB), "
+                        f"Smallest median: {validated_candidates[-1]['median_file_size'] / 1_000_000:.2f}MB "
+                        f"({validated_candidates[-1]['file_count']} files, total={validated_candidates[-1]['size_bytes'] / 1_000_000:.2f}MB)"
                     )
                     # Replace streams_to_process with size-sorted candidates
                     streams_to_process = [c["stream"] for c in validated_candidates] + streams_to_process[len(candidates_to_validate):]
@@ -211,8 +223,12 @@ class Downloader:
                             container, validated_service = validated_containers[stream_key]
                             # Use the service that validated it
                             service = validated_service
+                            median_size = self._calculate_median_file_size(container)
+                            file_count = len(container.files) if container.files else 0
                             logger.debug(
-                                f"Using pre-validated container for {stream.infohash[:8]}... (size={container.torrent_info.size_mb:.2f}MB)"
+                                f"Using pre-validated container for {stream.infohash[:8]}... "
+                                f"(median_file={median_size / 1_000_000:.2f}MB, "
+                                f"files={file_count}, total={container.torrent_info.size_mb:.2f}MB)"
                             )
                         else:
                             # Validate stream on this specific service
@@ -476,6 +492,49 @@ class Downloader:
         Uses the primary service for backward compatibility.
         """
         return self.validate_stream_on_service(stream, item, self.service)
+
+    def _calculate_median_file_size(self, container: TorrentContainer) -> int:
+        """
+        Calculate the median file size from a torrent container.
+        
+        This is used for fair comparison between multi-season bundles and single-season bundles.
+        A bundle with 9 seasons might have a huge total size, but if each episode is low quality,
+        the median will be low, making it rank lower than a single-season bundle with high-quality episodes.
+        
+        Args:
+            container: TorrentContainer with files
+            
+        Returns:
+            Median file size in bytes, or 0 if no files or sizes available
+        """
+        if not container or not container.files:
+            return 0
+        
+        # Get file sizes, filtering out None values
+        file_sizes = [
+            file.filesize for file in container.files
+            if file.filesize is not None and file.filesize > 0
+        ]
+        
+        if not file_sizes:
+            # Fallback to total torrent size if individual file sizes aren't available
+            if container.torrent_info and container.torrent_info.bytes:
+                return container.torrent_info.bytes
+            return 0
+        
+        # Calculate median
+        file_sizes.sort()
+        n = len(file_sizes)
+        if n == 0:
+            return 0
+        elif n % 2 == 0:
+            # Even number of files: average of two middle values
+            median = (file_sizes[n // 2 - 1] + file_sizes[n // 2]) / 2
+        else:
+            # Odd number of files: middle value
+            median = file_sizes[n // 2]
+        
+        return int(median)
 
     def validate_stream_on_service(
         self, stream: Stream, item: MediaItem, service
