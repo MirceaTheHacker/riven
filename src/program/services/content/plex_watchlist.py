@@ -91,39 +91,65 @@ class PlexWatchlist:
     def _fetch_title_from_tmdb(self, item: dict) -> str | None:
         """Fetch title from TMDB API using available IDs."""
         if not self.tmdb_api:
+            logger.debug("TMDB API not available for title fetch")
             return None
         
         item_type = item.get("type", "movie")
         tmdb_id = item.get("tmdb_id")
         imdb_id = item.get("imdb_id")
         
+        # Try both TMDB ID and IMDb ID to maximize chances of success
         try:
             if item_type == "movie":
+                # Try TMDB ID first (more direct)
                 if tmdb_id:
-                    result = self.tmdb_api.get_movie_details(tmdb_id)
-                    if result and result.data and hasattr(result.data, "title"):
-                        return result.data.title
-                elif imdb_id:
-                    # Lookup via IMDB ID
-                    results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
-                    if results and results.data and hasattr(results.data, "movie_results"):
-                        movie_results = results.data.movie_results
-                        if movie_results:
-                            return movie_results[0].title if hasattr(movie_results[0], "title") else None
+                    try:
+                        result = self.tmdb_api.get_movie_details(tmdb_id)
+                        if result and result.data and hasattr(result.data, "title"):
+                            logger.debug(f"Fetched title '{result.data.title}' from TMDB using TMDB ID {tmdb_id}")
+                            return result.data.title
+                    except Exception as e:
+                        logger.debug(f"TMDB ID lookup failed for {tmdb_id}: {e}")
+                
+                # Fallback to IMDb ID lookup
+                if imdb_id:
+                    try:
+                        results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
+                        if results and results.data and hasattr(results.data, "movie_results"):
+                            movie_results = results.data.movie_results
+                            if movie_results:
+                                title = movie_results[0].title if hasattr(movie_results[0], "title") else None
+                                if title:
+                                    logger.debug(f"Fetched title '{title}' from TMDB using IMDb ID {imdb_id}")
+                                    return title
+                    except Exception as e:
+                        logger.debug(f"IMDb ID lookup failed for {imdb_id}: {e}")
             elif item_type == "show":
+                # Try TMDB ID first (more direct)
                 if tmdb_id:
-                    result = self.tmdb_api.get_tv_details(tmdb_id)
-                    if result and result.data and hasattr(result.data, "name"):
-                        return result.data.name
-                elif imdb_id:
-                    # Lookup via IMDB ID
-                    results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
-                    if results and results.data and hasattr(results.data, "tv_results"):
-                        tv_results = results.data.tv_results
-                        if tv_results:
-                            return tv_results[0].name if hasattr(tv_results[0], "name") else None
+                    try:
+                        result = self.tmdb_api.get_tv_details(tmdb_id)
+                        if result and result.data and hasattr(result.data, "name"):
+                            logger.debug(f"Fetched title '{result.data.name}' from TMDB using TMDB ID {tmdb_id}")
+                            return result.data.name
+                    except Exception as e:
+                        logger.debug(f"TMDB ID lookup failed for {tmdb_id}: {e}")
+                
+                # Fallback to IMDb ID lookup
+                if imdb_id:
+                    try:
+                        results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
+                        if results and results.data and hasattr(results.data, "tv_results"):
+                            tv_results = results.data.tv_results
+                            if tv_results:
+                                title = tv_results[0].name if hasattr(tv_results[0], "name") else None
+                                if title:
+                                    logger.debug(f"Fetched title '{title}' from TMDB using IMDb ID {imdb_id}")
+                                    return title
+                    except Exception as e:
+                        logger.debug(f"IMDb ID lookup failed for {imdb_id}: {e}")
         except Exception as e:
-            logger.debug(f"Failed to fetch title from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}: {e}")
+            logger.warning(f"Unexpected error fetching title from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}: {e}")
         
         return None
 
@@ -133,9 +159,24 @@ class PlexWatchlist:
             title = d.get("title")
             item_type = d.get("type") or "movie"
             identifier = d.get("imdb_id") or d.get("tmdb_id") or d.get("tvdb_id") or title
-            if not title or not identifier:
-                logger.warning(f"Skipping watchlist item #{idx} in payload - missing title or identifier. Item keys: {list(d.keys())}, Item: {d}")
+            
+            # Require at least an identifier (IMDb/TMDB/TVDB ID) to proceed
+            if not identifier:
+                logger.warning(f"Skipping watchlist item #{idx} in payload - missing identifier. Item keys: {list(d.keys())}, Item: {d}")
                 continue
+            
+            # If no title but we have an IMDb ID, use the IMDb ID as title (W2P can handle direct navigation by IMDb ID)
+            # This allows W2P to use direct navigation instead of searching
+            if not title:
+                if d.get("imdb_id") and d.get("imdb_id").startswith("tt"):
+                    # Use IMDb ID as title - W2P will detect it and use direct navigation
+                    title = d.get("imdb_id")
+                    logger.debug(f"Using IMDb ID '{title}' as title for W2P direct navigation (item #{idx})")
+                else:
+                    # For non-IMDb IDs, we need a title for searching
+                    logger.warning(f"Skipping watchlist item #{idx} in payload - missing title and no IMDb ID for direct navigation. Item keys: {list(d.keys())}, Item: {d}")
+                    continue
+            
             payload.append(
                 {
                     "id": identifier,
@@ -344,11 +385,19 @@ class PlexWatchlist:
                         item["title"] = fetched_title
                         logger.debug(f"Fetched title '{fetched_title}' from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}")
                     else:
-                        # Last resort: use identifier as fallback (W2P needs a title for searching)
-                        identifier = item.get("imdb_id") or item.get("tmdb_id") or item.get("tvdb_id")
-                        if identifier:
-                            item["title"] = identifier
-                            logger.warning(f"Watchlist item missing title and TMDB fetch failed, using identifier '{identifier}' as fallback")
+                        # For IMDb IDs, W2P can use direct navigation, so we can still proceed
+                        # For other IDs, we need a title for searching
+                        imdb_id = item.get("imdb_id")
+                        if imdb_id and imdb_id.startswith("tt"):
+                            # W2P can handle IMDb IDs directly via navigation, so we'll let it proceed
+                            # The title will be set to the IMDb ID in _build_w2p_payload if needed
+                            logger.info(f"Watchlist item missing title but has IMDb ID '{imdb_id}' - W2P can use direct navigation")
+                        else:
+                            # Last resort: use identifier as fallback (W2P needs a title for searching)
+                            identifier = item.get("imdb_id") or item.get("tmdb_id") or item.get("tvdb_id")
+                            if identifier:
+                                item["title"] = identifier
+                                logger.warning(f"Watchlist item missing title and TMDB fetch failed, using identifier '{identifier}' as fallback")
                 
                 # Log item structure for debugging
                 logger.debug(f"Item to harvest structure: keys={list(item.keys())}, title={item.get('title')}, imdb={item.get('imdb_id')}, tmdb={item.get('tmdb_id')}, tvdb={item.get('tvdb_id')}")
