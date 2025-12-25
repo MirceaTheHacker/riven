@@ -240,7 +240,15 @@ class EpisodeValidationService:
             return
         
         # Get the show (parent of season)
-        show = item if item.type == "show" else item.show
+        if item.type == "show":
+            show = item
+        elif item.type == "season":
+            show = getattr(item, "parent", None)
+        elif item.type == "episode":
+            season = getattr(item, "parent", None)
+            show = getattr(season, "parent", None) if season else None
+        else:
+            show = None
         
         if not show:
             logger.warning(f"Cannot validate episodes - no show found for {item.log_string}")
