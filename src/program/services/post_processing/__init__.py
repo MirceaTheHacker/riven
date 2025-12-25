@@ -4,6 +4,7 @@ from program.media.item import MediaItem
 from program.media.state import States
 from program.services.post_processing.media_analysis import MediaAnalysisService
 from program.services.post_processing.subtitles.subtitle import SubtitleService
+from program.services.post_processing.episode_validation import EpisodeValidationService
 from program.settings.manager import settings_manager
 
 
@@ -16,9 +17,11 @@ class PostProcessing:
         # Initialize services in order of execution
         # MediaAnalysisService runs first to populate metadata
         # SubtitleService runs second and can use the metadata
+        # EpisodeValidationService runs last to check for missing episodes
         self.services = {
             MediaAnalysisService: MediaAnalysisService(),
             SubtitleService: SubtitleService(),
+            EpisodeValidationService: EpisodeValidationService(),
         }
         self.initialized = True
 
@@ -79,6 +82,12 @@ class PostProcessing:
             # Clean up streams when item is completed -- TODO: BLACKLISTING WONT WORK, WHY?
             # if process_item.last_state == States.Completed:
             #     process_item.streams.clear()
+
+        # Run episode validation on the original item (season or show)
+        # This checks for missing episodes after all processing is complete
+        if EpisodeValidationService.should_submit(item):
+            for _ in self.services[EpisodeValidationService].run(item):
+                pass  # Consume generator
 
         logger.info(f"Post-processing complete for {item.log_string}")
         yield item
