@@ -177,8 +177,8 @@ class PlexWatchlist:
         else:
             harvest_url = base_url
 
-        logger.info(f"Calling W2P at URL: {harvest_url} with {len(items_payload)} items")
-        logger.debug(f"W2P request payload: {items_payload}")
+        logger.info(f"🔍 Calling W2P at URL: {harvest_url} with {len(items_payload)} items")
+        logger.info(f"📦 W2P request payload: {[{'id': p.get('id'), 'title': p.get('title'), 'type': p.get('type'), 'season': p.get('season'), 'episode': p.get('episode')} for p in items_payload]}")
         logger.debug(f"W2P request headers: {headers}")
 
         try:
@@ -191,8 +191,13 @@ class PlexWatchlist:
                 logger.debug(f"W2P response status: {resp.status_code}")
                 resp.raise_for_status()
                 data = resp.json()
-                logger.info(f"W2P harvest returned {len(data.get('items', []))} items")
-                logger.info(f"W2P harvest response structure: status={data.get('status')}, processed_count={data.get('processed_count')}, items_count={len(data.get('items', []))}")
+                logger.info(f"✅ W2P harvest returned {len(data.get('items', []))} items")
+                logger.info(f"📊 W2P harvest response: status={data.get('status')}, processed_count={data.get('processed_count')}, items_count={len(data.get('items', []))}")
+                # Log releases count for each item
+                for idx, item_entry in enumerate(data.get('items', [])[:3]):  # Log first 3 items
+                    item_data = item_entry.get('item', item_entry)
+                    releases = item_entry.get('releases', [])
+                    logger.info(f"   Item {idx+1}: {item_data.get('title', 'unknown')} - {len(releases)} releases")
                 # Log first item structure for debugging
                 if data.get('items'):
                     first_item = data['items'][0]
