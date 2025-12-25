@@ -1,5 +1,6 @@
 """Plex Watchlist Module"""
 
+from datetime import datetime, timedelta
 from typing import Generator
 
 import httpx
@@ -301,11 +302,28 @@ class PlexWatchlist:
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
                     
-                    # Skip ALL completed items that have W2P releases (they've already been processed)
-                    # This prevents infinite loops where completed items are refreshed every 60 seconds
+                    # Skip completed items that HAVE W2P releases (they're done with W2P)
                     if is_completed and w2p_releases:
-                        logger.info(f"⏭️  Skipping {item.get('title', 'unknown')} - already completed with {len(w2p_releases)} W2P releases, no need to refresh from W2P")
+                        logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with {len(w2p_releases)} W2P releases, no need to refresh from W2P")
                         continue
+                    
+                    # For completed items WITHOUT W2P releases, check cooldown to prevent infinite loops
+                    # These items need W2P data for better quality, but we don't want to spam W2P every 60 seconds
+                    if is_completed and not w2p_releases:
+                        last_w2p_attempt = aliases.get("w2p_last_attempt")
+                        if last_w2p_attempt:
+                            try:
+                                # Parse the timestamp (stored as ISO string)
+                                attempt_time = datetime.fromisoformat(last_w2p_attempt.replace('Z', '+00:00'))
+                                # Check if it's been less than 24 hours since last attempt
+                                if datetime.now(attempt_time.tzinfo) - attempt_time < timedelta(hours=24):
+                                    logger.debug(f"Skipping {item.get('title', 'unknown')} - completed but no W2P releases, last attempt was {attempt_time.strftime('%Y-%m-%d %H:%M')}, cooldown active (24h)")
+                                    continue
+                            except (ValueError, AttributeError):
+                                # Invalid timestamp format, treat as old attempt and retry
+                                pass
+                        # Include it - either never attempted or cooldown expired
+                        logger.info(f"✅ Including {item.get('title', 'unknown')} - completed but no W2P releases (will fetch W2P data for better quality)")
                     
                     # Skip items that have W2P releases and are in a processing state (not completed)
                     # This prevents loops where items are reset to Indexed and then immediately re-harvested
@@ -313,8 +331,9 @@ class PlexWatchlist:
                         logger.info(f"⏭️  Skipping {item.get('title', 'unknown')} - has {len(w2p_releases)} W2P releases and is in {item_state} state (being processed), will not refresh")
                         continue
                     
-                    # Log why we're including the item (with detailed state info)
-                    logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}, is_completed={is_completed}")
+                    # Log why we're including the item (for non-completed items)
+                    if not is_completed:
+                        logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}")
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
@@ -343,6 +362,30 @@ class PlexWatchlist:
                 logger.info(f"Calling W2P to harvest {len(items_to_harvest)} items (skipped {skipped_count} items that already have W2P releases)")
                 w2p_payload = self._build_w2p_payload(items_to_harvest)
                 logger.info(f"W2P payload built: {len(w2p_payload)} items: {[p.get('title') for p in w2p_payload]}")
+                
+                # Store W2P attempt timestamp for all items being sent to W2P
+                # This allows us to implement cooldown periods to prevent infinite loops
+                attempt_timestamp = datetime.now().isoformat()
+                for item in items_to_harvest:
+                    # Find the existing item in database to update timestamp
+                    existing_item = None
+                    if item.get("imdb_id"):
+                        existing_item = get_item_by_external_id(imdb_id=item["imdb_id"])
+                    if not existing_item and item.get("tmdb_id"):
+                        existing_item = get_item_by_external_id(tmdb_id=item["tmdb_id"])
+                    if not existing_item and item.get("tvdb_id"):
+                        existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
+                    
+                    if existing_item:
+                        # Update the timestamp in aliases
+                        current_aliases = getattr(existing_item, "aliases", {}) or {}
+                        current_aliases["w2p_last_attempt"] = attempt_timestamp
+                        existing_item.set("aliases", current_aliases)
+                        # Save immediately so timestamp is stored even if W2P call fails
+                        with db.Session() as session:
+                            session.merge(existing_item)
+                            session.commit()
+                
                 w2p_results = self._call_w2p(w2p_payload)
                 logger.info(f"W2P returned {len(w2p_results)} results. Result keys: {list(w2p_results.keys())}")
 
