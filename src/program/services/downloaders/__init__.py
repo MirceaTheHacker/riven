@@ -151,6 +151,20 @@ class Downloader:
                 candidates_to_validate = streams_to_process[:5]
                 validated_candidates = []
                 
+                # Get season information from W2P releases to detect single-season vs multi-season packs
+                aliases_dict = getattr(item, "aliases", {}) or {}
+                w2p_releases = aliases_dict.get("w2p_releases") or []
+                season_map = {
+                    rel.get("infohash", "").lower(): rel.get("season")
+                    for rel in w2p_releases
+                    if rel.get("infohash")
+                }
+                
+                # Get target season if processing a specific season
+                target_season = None
+                if item.type == "season" and hasattr(item, "number"):
+                    target_season = item.number
+                
                 for candidate_stream in candidates_to_validate:
                     for service in available_services:
                         try:
@@ -160,6 +174,12 @@ class Downloader:
                                 # This ensures multi-season bundles are compared fairly
                                 median_file_size = self._calculate_median_file_size(container)
                                 
+                                # Check if this is a single-season release and if it matches target season
+                                infohash_lower = candidate_stream.infohash.lower()
+                                season = season_map.get(infohash_lower)
+                                is_single_season = season is not None
+                                matches_target_season = (target_season is not None and season == target_season) if season is not None else False
+                                
                                 validated_candidates.append({
                                     "stream": candidate_stream,
                                     "container": container,
@@ -168,26 +188,34 @@ class Downloader:
                                     "median_file_size": median_file_size,  # Use median for ranking
                                     "file_count": len(container.files) if container.files else 0,
                                     "torrent_id": container.torrent_id,
+                                    "is_single_season": is_single_season,  # Track if single-season release
+                                    "season": season,  # Season number if available
+                                    "matches_target_season": matches_target_season,  # Track if matches target season
                                 })
                                 logger.debug(
                                     f"Validated candidate for {item.log_string}: {candidate_stream.infohash[:8]}... "
                                     f"total={container.torrent_info.size_mb:.2f}MB, "
                                     f"median_file={median_file_size / 1_000_000:.2f}MB, "
-                                    f"files={len(container.files) if container.files else 0}"
+                                    f"files={len(container.files) if container.files else 0}, "
+                                    f"season={'S' + str(season) if season is not None else 'pack/multi-season'}"
                                 )
                                 break  # Found on this service, move to next candidate
                         except Exception as e:
                             logger.debug(f"Failed to validate candidate {candidate_stream.infohash[:8]}...: {e}")
                             continue
                 
-                # Sort by median file size (largest first) instead of total size
-                # This ensures multi-season bundles are compared fairly with single-season bundles
+                # Sort by: 1) matching target season first, 2) single-season releases, 3) median file size (largest first)
+                # This ensures we prefer matching season releases with high quality over multi-season packs
                 if validated_candidates:
-                    validated_candidates.sort(key=lambda x: x["median_file_size"], reverse=True)
+                    validated_candidates.sort(key=lambda x: (-x["matches_target_season"], -x["is_single_season"], -x["median_file_size"]))
+                    single_season_count = sum(1 for c in validated_candidates if c["is_single_season"])
+                    pack_count = len(validated_candidates) - single_season_count
                     logger.info(
-                        f"Re-ranked {len(validated_candidates)} candidates by median file size for {item.log_string} (hq profile). "
+                        f"Re-ranked {len(validated_candidates)} candidates for {item.log_string} (hq profile): "
+                        f"{single_season_count} single-season, {pack_count} packs/multi-season. "
                         f"Largest median: {validated_candidates[0]['median_file_size'] / 1_000_000:.2f}MB "
-                        f"({validated_candidates[0]['file_count']} files, total={validated_candidates[0]['size_bytes'] / 1_000_000:.2f}MB), "
+                        f"({validated_candidates[0]['file_count']} files, total={validated_candidates[0]['size_bytes'] / 1_000_000:.2f}MB, "
+                        f"season={'S' + str(validated_candidates[0]['season']) if validated_candidates[0]['season'] is not None else 'pack'}), "
                         f"Smallest median: {validated_candidates[-1]['median_file_size'] / 1_000_000:.2f}MB "
                         f"({validated_candidates[-1]['file_count']} files, total={validated_candidates[-1]['size_bytes'] / 1_000_000:.2f}MB)"
                     )

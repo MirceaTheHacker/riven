@@ -294,10 +294,10 @@ def _parse_results(
                 torrents, bucket_limit=scraping_settings.bucket_limit
             )
             
-            # For hq profile, re-sort by file size to prioritize larger files
-            # This helps select higher quality releases when multiple options are available
+            # For hq profile, re-sort to prefer single-season releases over multi-season packs
+            # This ensures we get the best quality per season, even if it means mixing sources
             if profile_name == "hq":
-                # Get size information from W2P releases if available
+                # Get size and season information from W2P releases if available
                 aliases_dict = getattr(item, "aliases", {}) or {}
                 w2p_releases = aliases_dict.get("w2p_releases") or []
                 size_map = {
@@ -305,17 +305,36 @@ def _parse_results(
                     for rel in w2p_releases
                     if rel.get("infohash") and rel.get("size_bytes")
                 }
+                # Map infohash to season number - single-season releases have a specific season
+                # Multi-season packs typically have season=None or are from the main show page
+                season_map = {
+                    rel.get("infohash", "").lower(): rel.get("season")
+                    for rel in w2p_releases
+                    if rel.get("infohash")
+                }
                 
                 # Convert torrents dict to list for sorting
                 torrent_list = list(torrents.values())
                 
-                # Sort by size (larger first), then by existing RTN rank (higher first)
+                # Get target season if processing a specific season
+                target_season = None
+                if item.type == "season" and hasattr(item, "number"):
+                    target_season = item.number
+                
+                # Sort by: 1) matching season releases first, 2) single-season releases (any season), 3) size (larger first), 4) RTN rank
                 def sort_key(torrent: Torrent) -> tuple:
+                    infohash_lower = torrent.infohash.lower()
+                    # Get season from W2P releases
+                    season = season_map.get(infohash_lower)
+                    # Prefer single-season releases (season is not None) over multi-season packs
+                    # is_single_season: True (1) for single-season, False (0) for packs/unknown
+                    is_single_season = 1 if season is not None else 0
+                    # If processing a specific season, prefer releases matching that season
+                    matches_target_season = 1 if (target_season is not None and season == target_season) else 0
                     # Get size from W2P releases if available, otherwise use 0
-                    size_bytes = size_map.get(torrent.infohash.lower(), 0)
-                    # Use negative size for descending order (larger files first)
-                    # RTN rank is already in the torrent object, we'll preserve relative order for same-size files
-                    return (-size_bytes, -getattr(torrent, 'rank', 0))
+                    size_bytes = size_map.get(infohash_lower, 0)
+                    # Sort: matching season first, then single-season, then by size, then by rank
+                    return (-matches_target_season, -is_single_season, -size_bytes, -getattr(torrent, 'rank', 0))
                 
                 torrent_list.sort(key=sort_key)
                 
@@ -323,8 +342,12 @@ def _parse_results(
                 torrents = {t.infohash.lower(): t for t in torrent_list}
                 
                 if size_map:
+                    single_season_count = sum(1 for t in torrent_list if season_map.get(t.infohash.lower()) is not None)
+                    pack_count = len(torrent_list) - single_season_count
                     logger.debug(
-                        f"Re-sorted {len(torrent_list)} torrents by file size for {item.log_string} (hq profile)"
+                        f"Re-sorted {len(torrent_list)} torrents for {item.log_string} (hq profile): "
+                        f"{single_season_count} single-season, {pack_count} packs/multi-season. "
+                        f"Single-season releases prioritized."
                     )
 
             keep_versions = ranking_settings.get_keep_versions_for_profile(
