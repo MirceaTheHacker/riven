@@ -673,11 +673,15 @@ class FilesystemService:
                             logger.debug(f"Path exists but is not a symlink: {target_path}, skipping")
                             continue
                     
-                    # Create the symlink
+                    # Create the symlink with rate limiting to prevent system overload
                     try:
                         os.symlink(source_path, target_path)
                         symlinks_created += 1
                         logger.debug(f"Created symlink: {target_path} -> {source_path}")
+                        # Rate limiting: small delay after each symlink to prevent overwhelming the filesystem
+                        # This helps prevent system hangs during large sync operations
+                        import time
+                        time.sleep(0.01)  # 10ms delay = max 100 symlinks/sec
                     except OSError as e:
                         logger.warning(f"Failed to create symlink {target_path} -> {source_path}: {e}")
                         symlinks_failed += 1
@@ -732,6 +736,9 @@ class FilesystemService:
                                 os.remove(symlink_path)
                                 symlinks_removed += 1
                                 logger.debug(f"Removed symlink: {symlink_path}")
+                                # Rate limiting: small delay to prevent overwhelming the filesystem
+                                import time
+                                time.sleep(0.01)  # 10ms delay = max 100 removals/sec
                             
                             # Try to remove empty parent directories
                             parent_dir = os.path.dirname(symlink_path)
