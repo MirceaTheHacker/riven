@@ -114,19 +114,58 @@ class Downloader:
                 if len(desired_hashes) >= keep_versions:
                     break
 
+            def _collect_show_wide_infohashes(item: MediaItem) -> set[str]:
+                """Collect infohashes from all seasons and episodes of the show to prevent duplicate downloads."""
+                infohashes = set()
+                
+                if item.type in ("show", "season", "episode"):
+                    from program.media.item import Show, Season, Episode
+                    
+                    # Get the root show
+                    show = None
+                    if item.type == "show":
+                        show = item
+                    elif item.type == "season":
+                        show = getattr(item, "parent", None)
+                    elif item.type == "episode":
+                        season = getattr(item, "parent", None)
+                        if season:
+                            show = getattr(season, "parent", None)
+                    
+                    # Collect infohashes from all seasons and episodes of the show
+                    if show:
+                        for season in getattr(show, "seasons", []):
+                            for entry in getattr(season, "filesystem_entries", []):
+                                infohash = getattr(entry, "infohash", None)
+                                if infohash:
+                                    infohashes.add(infohash.lower())
+                            for episode in getattr(season, "episodes", []):
+                                for entry in getattr(episode, "filesystem_entries", []):
+                                    infohash = getattr(entry, "infohash", None)
+                                    if infohash:
+                                        infohashes.add(infohash.lower())
+                
+                return infohashes
+            
+            # Collect existing infohashes from the current item and all related items
+            # This prevents the same multi-season pack from being downloaded multiple times
             existing_infohashes = {
                 getattr(entry, "infohash", "").lower()
                 for entry in getattr(item, "filesystem_entries", [])
                 if getattr(entry, "infohash", None)
             }
+            existing_infohashes.update(_collect_show_wide_infohashes(item))
 
             # Ensure retention is enforced even if no new downloads occur (e.g., keep_versions decreased)
             self._enforce_version_retention(item, keep_versions, desired_hashes)
+            
+            # Re-collect existing infohashes after retention enforcement (including show-wide check)
             existing_infohashes = {
                 getattr(entry, "infohash", "").lower()
                 for entry in getattr(item, "filesystem_entries", [])
                 if getattr(entry, "infohash", None)
             }
+            existing_infohashes.update(_collect_show_wide_infohashes(item))
 
             streams_to_process = [
                 stream
