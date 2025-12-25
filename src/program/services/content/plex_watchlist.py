@@ -491,7 +491,6 @@ class PlexWatchlist:
                                 
                                 if item_year and item_year != most_common_year:
                                     # Update the year
-                                    from datetime import datetime
                                     if hasattr(existing_item, "aired_at"):
                                         # Update aired_at to the correct year (keeping month/day if available, otherwise Jan 1)
                                         old_aired_at = existing_item.aired_at
