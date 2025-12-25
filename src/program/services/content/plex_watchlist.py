@@ -182,7 +182,17 @@ class PlexWatchlist:
         logger.debug(f"W2P request headers: {headers}")
 
         try:
-            with httpx.Client(timeout=120.0) as client:  # Increased timeout for browser automation
+            # Calculate timeout based on number of items
+            # Each item can take 30-60 seconds (especially shows with multiple seasons)
+            # Add buffer for network monitoring and processing
+            base_timeout = 60.0  # Base timeout per item
+            timeout_per_item = 90.0  # Additional seconds per item
+            total_timeout = base_timeout + (len(items_payload) * timeout_per_item)
+            # Cap at 10 minutes (600 seconds) to prevent extremely long waits
+            total_timeout = min(total_timeout, 600.0)
+            
+            logger.info(f"W2P timeout set to {total_timeout:.0f}s for {len(items_payload)} items")
+            with httpx.Client(timeout=total_timeout) as client:
                 resp = client.post(
                     harvest_url,
                     json={"items": items_payload},
@@ -292,11 +302,19 @@ class PlexWatchlist:
                         logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with streams, no need to refresh from W2P")
                         continue
                     
-                    # Check if item already has W2P releases stored (for logging)
+                    # Check if item already has W2P releases stored
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
+                    
+                    # Skip items that have W2P releases and are in a processing state (not completed)
+                    # This prevents loops where items are reset to Indexed and then immediately re-harvested
+                    if w2p_releases and not is_completed:
+                        logger.debug(f"Skipping {item.get('title', 'unknown')} - has {len(w2p_releases)} W2P releases and is in {item_state} state (being processed), will not refresh")
+                        continue
+                    
+                    # Log why we're including the item
                     if w2p_releases:
-                        logger.debug(f"Including {item.get('title', 'unknown')} - exists with {len(w2p_releases)} W2P releases, will refresh from W2P")
+                        logger.debug(f"Including {item.get('title', 'unknown')} - exists with {len(w2p_releases)} W2P releases, will refresh from W2P (item is completed, checking for better quality)")
                     else:
                         logger.debug(f"Including {item.get('title', 'unknown')} - exists in database but has no W2P releases (will check for better quality)")
                 else:
