@@ -342,21 +342,22 @@ class PlexWatchlist:
                     # Check if item already has W2P releases stored
                     aliases = getattr(existing_item, "aliases", {}) or {}
                     w2p_releases = aliases.get("w2p_releases") or []
+                    w2p_attempt_count = aliases.get("w2p_attempt_count", 0)
+                    
+                    # Check retry count for ALL items (not just completed) to prevent infinite loops
+                    # Max 3 attempts to prevent infinite loops
+                    if w2p_attempt_count >= 3 and not w2p_releases:
+                        logger.info(f"⏭️  Skipping {item.get('title', 'unknown')} - no W2P releases after {w2p_attempt_count} attempts (max 3), state={item_state}")
+                        continue
                     
                     # Skip completed items that HAVE W2P releases (they're done with W2P)
                     if is_completed and w2p_releases:
                         logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with {len(w2p_releases)} W2P releases, no need to refresh from W2P")
                         continue
                     
-                    # For completed items WITHOUT W2P releases, check retry count and cooldown to prevent infinite loops
+                    # For completed items WITHOUT W2P releases, check cooldown to prevent spam
                     # These items need W2P data for better quality, but we don't want to spam W2P every 60 seconds
                     if is_completed and not w2p_releases:
-                        w2p_attempt_count = aliases.get("w2p_attempt_count", 0)
-                        # Max 3 attempts to prevent infinite loops
-                        if w2p_attempt_count >= 3:
-                            logger.debug(f"Skipping {item.get('title', 'unknown')} - completed but no W2P releases after {w2p_attempt_count} attempts (max 3)")
-                            continue
-                        
                         last_w2p_attempt = aliases.get("w2p_last_attempt")
                         if last_w2p_attempt:
                             try:
@@ -380,7 +381,10 @@ class PlexWatchlist:
                     
                     # Log why we're including the item (for non-completed items)
                     if not is_completed:
-                        logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}")
+                        if w2p_attempt_count > 0:
+                            logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}, attempt {w2p_attempt_count + 1}/3")
+                        else:
+                            logger.info(f"✅ Including {item.get('title', 'unknown')} - state={item_state}, has_w2p_releases={len(w2p_releases) > 0}")
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
@@ -432,15 +436,9 @@ class PlexWatchlist:
                         existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
                     
                     if existing_item:
-                        # Update the timestamp and attempt count in aliases
+                        # Update the timestamp in aliases (attempt count will be updated after W2P call based on results)
                         current_aliases = getattr(existing_item, "aliases", {}) or {}
                         current_aliases["w2p_last_attempt"] = attempt_timestamp
-                        # Increment attempt count if no W2P releases exist
-                        if not current_aliases.get("w2p_releases"):
-                            current_aliases["w2p_attempt_count"] = current_aliases.get("w2p_attempt_count", 0) + 1
-                        else:
-                            # Reset attempt count if we have releases
-                            current_aliases["w2p_attempt_count"] = 0
                         existing_item.set("aliases", current_aliases)
                         # Save immediately so timestamp is stored even if W2P call fails
                         with db.Session() as session:
@@ -508,12 +506,9 @@ class PlexWatchlist:
                         except Exception as e:
                             logger.error(f"❌ Failed to query RD library for {w2p_title}: {e}", exc_info=True)
                     
-                    if not releases:
-                        skipped_no_releases += 1
-                        logger.error(f"Skipping {w2p_title} (ID: {w2p_id}) - no W2P releases found in DMM. Entry keys: {list(w2p_entry.keys())}, Entry structure: {w2p_entry}")
-                        continue
-                    
                     # Find the matching watchlist item - try ID first, then title
+                    # NOTE: We process even when releases is empty to track attempt count and create/update the item
+                    # This prevents infinite loops where items are treated as "new" every time
                     d = ident_to_watchlist_item.get(str(w2p_id)) if w2p_id else None
                     if not d and w2p_title:
                         # Fallback: try matching by title
@@ -554,6 +549,13 @@ class PlexWatchlist:
                         
                         # Update existing item with W2P releases
                         current_aliases["w2p_releases"] = releases
+                        # Update attempt count based on whether we got releases (AFTER we know the results)
+                        if releases and len(releases) > 0:
+                            # Reset attempt count if we got releases
+                            current_aliases["w2p_attempt_count"] = 0
+                        else:
+                            # Increment attempt count if no releases (empty list or None)
+                            current_aliases["w2p_attempt_count"] = current_aliases.get("w2p_attempt_count", 0) + 1
                         existing_item.set("aliases", current_aliases)
                         
                         # Try to correct the item's year from W2P releases if there's a clear mismatch
@@ -642,9 +644,36 @@ class PlexWatchlist:
                             # fallback to imdb-only
                             item_data = {"imdb_id": d.get("imdb_id"), "requested_by": self.key}
 
-                        item_data["aliases"] = {"w2p_releases": releases}
-                        items_to_yield.append(MediaItem(item_data))
-                        logger.info(f"Created new item {d.get('title')} with {len(releases)} releases from W2P")
+                        # For new items, set attempt count based on whether we got releases
+                        if releases and len(releases) > 0:
+                            item_data["aliases"] = {"w2p_releases": releases, "w2p_attempt_count": 0}
+                            logger.info(f"✅ Created new item {d.get('title')} with {len(releases)} releases from W2P (attempt_count=0)")
+                        else:
+                            item_data["aliases"] = {"w2p_releases": releases, "w2p_attempt_count": 1}
+                            logger.warning(f"⚠️  Created new item {d.get('title')} with 0 releases from W2P (attempt_count=1). This item will be tracked to prevent infinite retries.")
+                        
+                        new_item = MediaItem(item_data)
+                        # For items with 0 releases, save immediately to database so attempt count is tracked
+                        # This prevents them from being treated as "new" on the next run
+                        if not releases or len(releases) == 0:
+                            try:
+                                with db.Session() as session:
+                                    # Check if item already exists (race condition check)
+                                    if not item_exists_by_any_id(
+                                        imdb_id=new_item.imdb_id,
+                                        tvdb_id=new_item.tvdb_id,
+                                        tmdb_id=new_item.tmdb_id
+                                    ):
+                                        new_item.store_state()
+                                        session.add(new_item)
+                                        session.commit()
+                                        logger.info(f"💾 Saved new item {d.get('title')} to database immediately (0 releases, attempt_count=1) to prevent infinite retries")
+                                    else:
+                                        logger.debug(f"Item {d.get('title')} already exists in database (race condition), skipping immediate save")
+                            except Exception as e:
+                                logger.warning(f"Failed to save item {d.get('title')} immediately: {e}", exc_info=True)
+                        
+                        items_to_yield.append(new_item)
                     
                     matched_count += 1
             
