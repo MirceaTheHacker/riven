@@ -348,9 +348,15 @@ class PlexWatchlist:
                         logger.debug(f"Skipping {item.get('title', 'unknown')} - already completed with {len(w2p_releases)} W2P releases, no need to refresh from W2P")
                         continue
                     
-                    # For completed items WITHOUT W2P releases, check cooldown to prevent infinite loops
+                    # For completed items WITHOUT W2P releases, check retry count and cooldown to prevent infinite loops
                     # These items need W2P data for better quality, but we don't want to spam W2P every 60 seconds
                     if is_completed and not w2p_releases:
+                        w2p_attempt_count = aliases.get("w2p_attempt_count", 0)
+                        # Max 3 attempts to prevent infinite loops
+                        if w2p_attempt_count >= 3:
+                            logger.debug(f"Skipping {item.get('title', 'unknown')} - completed but no W2P releases after {w2p_attempt_count} attempts (max 3)")
+                            continue
+                        
                         last_w2p_attempt = aliases.get("w2p_last_attempt")
                         if last_w2p_attempt:
                             try:
@@ -364,7 +370,7 @@ class PlexWatchlist:
                                 # Invalid timestamp format, treat as old attempt and retry
                                 pass
                         # Include it - either never attempted or cooldown expired
-                        logger.info(f"✅ Including {item.get('title', 'unknown')} - completed but no W2P releases (will fetch W2P data for better quality)")
+                        logger.info(f"✅ Including {item.get('title', 'unknown')} - completed but no W2P releases (attempt {w2p_attempt_count + 1}/3, will fetch W2P data for better quality)")
                     
                     # Skip items that have W2P releases and are in a processing state (not completed)
                     # This prevents loops where items are reset to Indexed and then immediately re-harvested
@@ -426,9 +432,15 @@ class PlexWatchlist:
                         existing_item = get_item_by_external_id(tvdb_id=item["tvdb_id"])
                     
                     if existing_item:
-                        # Update the timestamp in aliases
+                        # Update the timestamp and attempt count in aliases
                         current_aliases = getattr(existing_item, "aliases", {}) or {}
                         current_aliases["w2p_last_attempt"] = attempt_timestamp
+                        # Increment attempt count if no W2P releases exist
+                        if not current_aliases.get("w2p_releases"):
+                            current_aliases["w2p_attempt_count"] = current_aliases.get("w2p_attempt_count", 0) + 1
+                        else:
+                            # Reset attempt count if we have releases
+                            current_aliases["w2p_attempt_count"] = 0
                         existing_item.set("aliases", current_aliases)
                         # Save immediately so timestamp is stored even if W2P call fails
                         with db.Session() as session:
@@ -456,8 +468,45 @@ class PlexWatchlist:
                     w2p_id = w2p_item.get("id") or w2p_item.get("title")
                     w2p_title = w2p_item.get("title", "unknown")
                     releases = w2p_entry.get("releases") or []
+                    needs_rd_library_check = w2p_entry.get("needs_rd_library_check", False)
                     
-                    logger.warning(f"Processing W2P result: title={w2p_title}, id={w2p_id}, releases_count={len(releases)}, entry_keys={list(w2p_entry.keys())}, item_keys={list(w2p_item.keys())}")
+                    logger.warning(f"Processing W2P result: title={w2p_title}, id={w2p_id}, releases_count={len(releases)}, needs_rd_library_check={needs_rd_library_check}, entry_keys={list(w2p_entry.keys())}, item_keys={list(w2p_item.keys())}")
+                    
+                    # Edge case: W2P clicked Instant RD buttons but got no releases
+                    # Query RD library directly to find the torrents that were just added
+                    if not releases and needs_rd_library_check:
+                        logger.info(f"🔍 Edge case detected for {w2p_title}: W2P clicked Instant RD buttons but got no releases. Querying RD library...")
+                        try:
+                            from program.services.downloaders import Downloader
+                            downloader = Downloader()
+                            if downloader.service and hasattr(downloader.service, 'get_downloads'):
+                                rd_downloads = downloader.service.get_downloads()
+                                # Filter downloads by title (fuzzy match)
+                                title_lower = w2p_title.lower()
+                                matching_downloads = []
+                                for dl in rd_downloads:
+                                    dl_name = getattr(dl, 'filename', '') or getattr(dl, 'name', '') or ''
+                                    if title_lower in dl_name.lower() or dl_name.lower() in title_lower:
+                                        matching_downloads.append(dl)
+                                
+                                if matching_downloads:
+                                    logger.info(f"✅ Found {len(matching_downloads)} matching torrent(s) in RD library for {w2p_title}")
+                                    # Convert RD downloads to W2P release format
+                                    for dl in matching_downloads:
+                                        dl_name = getattr(dl, 'filename', '') or getattr(dl, 'name', '')
+                                        dl_size = getattr(dl, 'bytes', 0) or 0
+                                        dl_hash = getattr(dl, 'hash', '') or ''
+                                        releases.append({
+                                            "title": dl_name,
+                                            "size_bytes": dl_size,
+                                            "infohash": dl_hash,
+                                            "source_label": "rd-library",
+                                            "already_in_rd": True,
+                                        })
+                                else:
+                                    logger.warning(f"⚠️ No matching torrents found in RD library for {w2p_title}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to query RD library for {w2p_title}: {e}", exc_info=True)
                     
                     if not releases:
                         skipped_no_releases += 1
