@@ -659,19 +659,50 @@ class PlexWatchlist:
                             try:
                                 with db.Session() as session:
                                     # Check if item already exists (race condition check)
-                                    if not item_exists_by_any_id(
+                                    exists = item_exists_by_any_id(
                                         imdb_id=new_item.imdb_id,
                                         tvdb_id=new_item.tvdb_id,
                                         tmdb_id=new_item.tmdb_id
-                                    ):
+                                    )
+                                    if not exists:
                                         new_item.store_state()
                                         session.add(new_item)
                                         session.commit()
-                                        logger.info(f"💾 Saved new item {d.get('title')} to database immediately (0 releases, attempt_count=1) to prevent infinite retries")
+                                        # Refresh the item to get its ID
+                                        session.refresh(new_item)
+                                        logger.info(f"💾 Saved new item {d.get('title')} (ID: {new_item.id}) to database immediately (0 releases, attempt_count=1, imdb={new_item.imdb_id}, tmdb={new_item.tmdb_id}) to prevent infinite retries")
+                                        # Don't add to items_to_yield since it's already saved and will be found on next run
+                                        # This prevents it from being processed again in the same cycle
+                                        continue
                                     else:
                                         logger.debug(f"Item {d.get('title')} already exists in database (race condition), skipping immediate save")
+                                        # Item exists, so we should update it instead of creating a new one
+                                        # Fetch the existing item and update it
+                                        existing_item = None
+                                        if d.get("imdb_id"):
+                                            existing_item = get_item_by_external_id(imdb_id=d["imdb_id"])
+                                        if not existing_item and d.get("tmdb_id"):
+                                            existing_item = get_item_by_external_id(tmdb_id=d["tmdb_id"])
+                                        if not existing_item and d.get("tvdb_id"):
+                                            existing_item = get_item_by_external_id(tvdb_id=d["tvdb_id"])
+                                        
+                                        if existing_item:
+                                            # Update the existing item's attempt count
+                                            current_aliases = getattr(existing_item, "aliases", {}) or {}
+                                            current_aliases["w2p_releases"] = releases
+                                            current_aliases["w2p_attempt_count"] = current_aliases.get("w2p_attempt_count", 0) + 1
+                                            existing_item.set("aliases", current_aliases)
+                                            with db.Session() as update_session:
+                                                update_session.merge(existing_item)
+                                                update_session.commit()
+                                            logger.info(f"💾 Updated existing item {d.get('title')} (ID: {existing_item.id}) with attempt_count={current_aliases['w2p_attempt_count']} (0 releases)")
+                                            # Don't add to items_to_yield since it's already updated
+                                            continue
                             except Exception as e:
-                                logger.warning(f"Failed to save item {d.get('title')} immediately: {e}", exc_info=True)
+                                logger.error(f"❌ Failed to save item {d.get('title')} immediately: {e}", exc_info=True)
+                        else:
+                            # Items with releases will be saved via the normal flow
+                            logger.debug(f"Item {d.get('title')} has {len(releases)} releases, will be saved via normal flow")
                         
                         items_to_yield.append(new_item)
                     
