@@ -267,18 +267,19 @@ class PlexWatchlist:
         logger.info(f"📦 W2P request payload: {[{'id': p.get('id'), 'title': p.get('title'), 'type': p.get('type'), 'season': p.get('season'), 'episode': p.get('episode')} for p in items_payload]}")
         logger.debug(f"W2P request headers: {headers}")
 
+        # Calculate timeout for single item (since we process one at a time now)
+        # Each item can take 60-180 seconds (especially shows with multiple seasons and Instant RD button clicks)
+        # Add buffer for network monitoring and processing
+        # Since we process items one at a time, we only need timeout for a single item
+        base_timeout = 60.0  # Base timeout for connection and initial processing
+        timeout_per_item = 180.0  # Additional seconds per item (increased for shows with many seasons and button clicks)
+        total_timeout = base_timeout + timeout_per_item
+        # Cap at 10 minutes (600 seconds) per item to allow for very large shows with many seasons
+        total_timeout = min(total_timeout, 600.0)
+        
+        logger.info(f"W2P timeout set to {total_timeout:.0f}s for 1 item")
+        
         try:
-            # Calculate timeout for single item (since we process one at a time now)
-            # Each item can take 60-120 seconds (especially shows with multiple seasons)
-            # Add buffer for network monitoring and processing
-            # Since we process items one at a time, we only need timeout for a single item
-            base_timeout = 60.0  # Base timeout
-            timeout_per_item = 120.0  # Additional seconds per item (increased for shows with many seasons)
-            total_timeout = base_timeout + timeout_per_item
-            # Cap at 5 minutes (300 seconds) per item to prevent extremely long waits
-            total_timeout = min(total_timeout, 300.0)
-            
-            logger.info(f"W2P timeout set to {total_timeout:.0f}s for 1 item")
             with httpx.Client(timeout=total_timeout) as client:
                 resp = client.post(
                     harvest_url,
@@ -303,7 +304,8 @@ class PlexWatchlist:
                 else:
                     logger.warning(f"W2P returned no items in response. Full response: {data}")
         except httpx.TimeoutException as e:
-            logger.error(f"W2P request timed out after 120s to {harvest_url}: {e}")
+            logger.error(f"W2P request timed out after {total_timeout:.0f}s to {harvest_url}: {e}")
+            logger.warning(f"W2P may need more time for this item (especially shows with many seasons). Consider increasing timeout if this happens frequently.")
             return {}
         except httpx.ConnectError as e:
             logger.error(f"W2P connection error - cannot reach {harvest_url}. Is W2P running? Error: {e}")
