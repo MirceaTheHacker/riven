@@ -88,11 +88,15 @@ class PlexWatchlist:
                     return False
         return True
 
-    def _fetch_title_from_tmdb(self, item: dict) -> str | None:
-        """Fetch title from TMDB API using available IDs."""
+    def _fetch_title_from_tmdb(self, item: dict) -> tuple[str | None, str | None]:
+        """Fetch title and correct type from TMDB API using available IDs.
+        
+        Returns:
+            tuple: (title, type) where type is 'movie' or 'show', or (None, None) if fetch fails
+        """
         if not self.tmdb_api:
             logger.debug("TMDB API not available for title fetch")
-            return None
+            return None, None
         
         item_type = item.get("type", "movie")
         tmdb_id = item.get("tmdb_id")
@@ -107,7 +111,7 @@ class PlexWatchlist:
                         result = self.tmdb_api.get_movie_details(tmdb_id)
                         if result and result.data and hasattr(result.data, "title"):
                             logger.debug(f"Fetched title '{result.data.title}' from TMDB using TMDB ID {tmdb_id}")
-                            return result.data.title
+                            return result.data.title, "movie"
                     except Exception as e:
                         logger.debug(f"TMDB ID lookup failed for {tmdb_id}: {e}")
                 
@@ -115,13 +119,21 @@ class PlexWatchlist:
                 if imdb_id:
                     try:
                         results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
-                        if results and results.data and hasattr(results.data, "movie_results"):
-                            movie_results = results.data.movie_results
-                            if movie_results:
+                        if results and results.data:
+                            # Check movie results first
+                            if hasattr(results.data, "movie_results") and results.data.movie_results:
+                                movie_results = results.data.movie_results
                                 title = movie_results[0].title if hasattr(movie_results[0], "title") else None
                                 if title:
-                                    logger.debug(f"Fetched title '{title}' from TMDB using IMDb ID {imdb_id}")
-                                    return title
+                                    logger.debug(f"Fetched title '{title}' (movie) from TMDB using IMDb ID {imdb_id}")
+                                    return title, "movie"
+                            # Check TV results if movie didn't work
+                            if hasattr(results.data, "tv_results") and results.data.tv_results:
+                                tv_results = results.data.tv_results
+                                title = tv_results[0].name if hasattr(tv_results[0], "name") else None
+                                if title:
+                                    logger.debug(f"Fetched title '{title}' (show) from TMDB using IMDb ID {imdb_id}")
+                                    return title, "show"
                     except Exception as e:
                         logger.debug(f"IMDb ID lookup failed for {imdb_id}: {e}")
             elif item_type == "show":
@@ -131,7 +143,7 @@ class PlexWatchlist:
                         result = self.tmdb_api.get_tv_details(tmdb_id)
                         if result and result.data and hasattr(result.data, "name"):
                             logger.debug(f"Fetched title '{result.data.name}' from TMDB using TMDB ID {tmdb_id}")
-                            return result.data.name
+                            return result.data.name, "show"
                     except Exception as e:
                         logger.debug(f"TMDB ID lookup failed for {tmdb_id}: {e}")
                 
@@ -139,19 +151,49 @@ class PlexWatchlist:
                 if imdb_id:
                     try:
                         results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
-                        if results and results.data and hasattr(results.data, "tv_results"):
-                            tv_results = results.data.tv_results
-                            if tv_results:
+                        if results and results.data:
+                            # Check TV results first
+                            if hasattr(results.data, "tv_results") and results.data.tv_results:
+                                tv_results = results.data.tv_results
                                 title = tv_results[0].name if hasattr(tv_results[0], "name") else None
                                 if title:
-                                    logger.debug(f"Fetched title '{title}' from TMDB using IMDb ID {imdb_id}")
-                                    return title
+                                    logger.debug(f"Fetched title '{title}' (show) from TMDB using IMDb ID {imdb_id}")
+                                    return title, "show"
+                            # Check movie results if TV didn't work
+                            if hasattr(results.data, "movie_results") and results.data.movie_results:
+                                movie_results = results.data.movie_results
+                                title = movie_results[0].title if hasattr(movie_results[0], "title") else None
+                                if title:
+                                    logger.debug(f"Fetched title '{title}' (movie) from TMDB using IMDb ID {imdb_id}")
+                                    return title, "movie"
                     except Exception as e:
                         logger.debug(f"IMDb ID lookup failed for {imdb_id}: {e}")
         except Exception as e:
             logger.warning(f"Unexpected error fetching title from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}: {e}")
         
-        return None
+        # If type is unknown, try both movie and TV via IMDb ID
+        if not item.get("type") and imdb_id:
+            try:
+                results = self.tmdb_api.get_from_external_id("imdb_id", imdb_id)
+                if results and results.data:
+                    # Try TV first (more common for missing type)
+                    if hasattr(results.data, "tv_results") and results.data.tv_results:
+                        tv_results = results.data.tv_results
+                        title = tv_results[0].name if hasattr(tv_results[0], "name") else None
+                        if title:
+                            logger.debug(f"Fetched title '{title}' (show) from TMDB using IMDb ID {imdb_id}")
+                            return title, "show"
+                    # Try movie if TV didn't work
+                    if hasattr(results.data, "movie_results") and results.data.movie_results:
+                        movie_results = results.data.movie_results
+                        title = movie_results[0].title if hasattr(movie_results[0], "title") else None
+                        if title:
+                            logger.debug(f"Fetched title '{title}' (movie) from TMDB using IMDb ID {imdb_id}")
+                            return title, "movie"
+            except Exception as e:
+                logger.debug(f"IMDb ID lookup failed for {imdb_id}: {e}")
+        
+        return None, None
 
     def _build_w2p_payload(self, watchlist_items: list[dict[str, str]]) -> list[dict]:
         payload = []
@@ -219,21 +261,24 @@ class PlexWatchlist:
         else:
             harvest_url = base_url
 
-        logger.info(f"🔍 Calling W2P at URL: {harvest_url} with {len(items_payload)} items")
+        logger.info(f"🔍 Calling W2P at URL: {harvest_url} with {len(items_payload)} item(s)")
+        if len(items_payload) > 1:
+            logger.warning(f"⚠️ WARNING: Sending {len(items_payload)} items in a single request! This should be 1 item at a time to avoid timeouts.")
         logger.info(f"📦 W2P request payload: {[{'id': p.get('id'), 'title': p.get('title'), 'type': p.get('type'), 'season': p.get('season'), 'episode': p.get('episode')} for p in items_payload]}")
         logger.debug(f"W2P request headers: {headers}")
 
         try:
-            # Calculate timeout based on number of items
-            # Each item can take 30-60 seconds (especially shows with multiple seasons)
+            # Calculate timeout for single item (since we process one at a time now)
+            # Each item can take 60-120 seconds (especially shows with multiple seasons)
             # Add buffer for network monitoring and processing
-            base_timeout = 60.0  # Base timeout per item
-            timeout_per_item = 90.0  # Additional seconds per item
-            total_timeout = base_timeout + (len(items_payload) * timeout_per_item)
-            # Cap at 10 minutes (600 seconds) to prevent extremely long waits
-            total_timeout = min(total_timeout, 600.0)
+            # Since we process items one at a time, we only need timeout for a single item
+            base_timeout = 60.0  # Base timeout
+            timeout_per_item = 120.0  # Additional seconds per item (increased for shows with many seasons)
+            total_timeout = base_timeout + timeout_per_item
+            # Cap at 5 minutes (300 seconds) per item to prevent extremely long waits
+            total_timeout = min(total_timeout, 300.0)
             
-            logger.info(f"W2P timeout set to {total_timeout:.0f}s for {len(items_payload)} items")
+            logger.info(f"W2P timeout set to {total_timeout:.0f}s for 1 item")
             with httpx.Client(timeout=total_timeout) as client:
                 resp = client.post(
                     harvest_url,
@@ -388,12 +433,14 @@ class PlexWatchlist:
                 else:
                     logger.debug(f"Including {item.get('title', 'unknown')} - new item, will fetch from W2P")
                 
-                # If still no title, fetch from TMDB
-                if not item.get("title"):
-                    fetched_title = self._fetch_title_from_tmdb(item)
+                # If still no title or type, fetch from TMDB
+                if not item.get("title") or not item.get("type"):
+                    fetched_title, fetched_type = self._fetch_title_from_tmdb(item)
                     if fetched_title:
                         item["title"] = fetched_title
-                        logger.debug(f"Fetched title '{fetched_title}' from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}")
+                        if fetched_type:
+                            item["type"] = fetched_type
+                        logger.debug(f"Fetched title '{fetched_title}' (type: {fetched_type}) from TMDB for {item.get('imdb_id') or item.get('tmdb_id')}")
                     else:
                         # For IMDb IDs, W2P can use direct navigation, so we can still proceed
                         # For other IDs, we need a title for searching
@@ -418,14 +465,17 @@ class PlexWatchlist:
                 w2p_results = {}
             else:
                 skipped_count = len(watchlist_items) - len(items_to_harvest)
-                logger.info(f"Calling W2P to harvest {len(items_to_harvest)} items (skipped {skipped_count} items that already have W2P releases)")
-                w2p_payload = self._build_w2p_payload(items_to_harvest)
-                logger.info(f"W2P payload built: {len(w2p_payload)} items: {[p.get('title') for p in w2p_payload]}")
+                logger.info(f"Calling W2P to harvest {len(items_to_harvest)} items one at a time (skipped {skipped_count} items that already have W2P releases)")
                 
-                # Store W2P attempt timestamp for all items being sent to W2P
-                # This allows us to implement cooldown periods to prevent infinite loops
+                # Process items one at a time to avoid timeouts
+                # Each item can take 60-90 seconds, so batching multiple items causes timeouts
+                w2p_results = {}
                 attempt_timestamp = datetime.now().isoformat()
-                for item in items_to_harvest:
+                
+                for idx, item in enumerate(items_to_harvest, 1):
+                    item_title = item.get("title", "unknown")
+                    logger.info(f"Processing item {idx}/{len(items_to_harvest)}: {item_title}")
+                    
                     # Find the existing item in database to update timestamp
                     existing_item = None
                     if item.get("imdb_id"):
@@ -444,9 +494,23 @@ class PlexWatchlist:
                         with db.Session() as session:
                             session.merge(existing_item)
                             session.commit()
+                    
+                    # Build payload for single item
+                    single_item_payload = self._build_w2p_payload([item])
+                    logger.debug(f"W2P payload for '{item_title}': {single_item_payload}")
+                    
+                    # Call W2P for this single item
+                    try:
+                        single_item_results = self._call_w2p(single_item_payload)
+                        # Merge results into main results dict
+                        w2p_results.update(single_item_results)
+                        logger.info(f"✅ Completed {idx}/{len(items_to_harvest)}: {item_title} - {len(single_item_results)} result(s)")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to process {idx}/{len(items_to_harvest)}: {item_title} - {e}")
+                        # Continue with next item even if this one fails
+                        continue
                 
-                w2p_results = self._call_w2p(w2p_payload)
-                logger.info(f"W2P returned {len(w2p_results)} results. Result keys: {list(w2p_results.keys())}")
+                logger.info(f"W2P processing complete: {len(w2p_results)} total results from {len(items_to_harvest)} items")
 
                 # Build a mapping of identifier -> watchlist item for easier lookup
                 ident_to_watchlist_item = {}
