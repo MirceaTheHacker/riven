@@ -49,6 +49,10 @@ class Downloader:
         self._circuit_breaker_retries = {}
         # Track per-service cooldowns when circuit breaker is open
         self._service_cooldowns = {}  # {service.key: datetime}
+        # Track download failure attempts per item to prevent infinite retry loops
+        self._download_failure_attempts = {}  # {item.id: count}
+        self._download_failure_cooldowns = {}  # {item.id: datetime}
+        self._max_download_failures = 5  # Maximum retry attempts before giving up
 
     def validate(self):
         if not self.initialized_services:
@@ -449,14 +453,38 @@ class Downloader:
                 )
                 yield (item, next_attempt)
                 return
-            else:
-                logger.debug(
-                    f"Failed to download any streams for {item.log_string} ({item.id})"
+            
+            # Track download failure attempts to prevent infinite retry loops
+            failure_count = self._download_failure_attempts.get(item.id, 0) + 1
+            self._download_failure_attempts[item.id] = failure_count
+            
+            if failure_count >= self._max_download_failures:
+                logger.warning(
+                    f"Failed to download {item.log_string} ({item.id}) after {failure_count} attempts. Giving up to prevent infinite retry loop."
                 )
+                # Don't yield the item - this prevents it from being re-queued
+                # The item will remain in its current state
+                return
+            
+            # Calculate exponential backoff: 1min, 2min, 4min, 8min, 16min
+            cooldown_minutes = min(2 ** (failure_count - 1), 16)
+            next_attempt = datetime.now() + timedelta(minutes=cooldown_minutes)
+            self._download_failure_cooldowns[item.id] = next_attempt
+            
+            logger.warning(
+                f"Failed to download any streams for {item.log_string} ({item.id}) - attempt {failure_count}/{self._max_download_failures}. "
+                f"Retrying after {cooldown_minutes} minute(s) at {next_attempt.strftime('%m/%d/%y %H:%M:%S')}"
+            )
+            # Yield tuple with future timestamp to schedule retry after cooldown
+            yield (item, next_attempt)
+            return
         else:
             # Clear retry count and service cooldowns on successful download
             self._circuit_breaker_retries.pop(item.id, None)
             self._service_cooldowns.clear()
+            # Clear download failure tracking on success
+            self._download_failure_attempts.pop(item.id, None)
+            self._download_failure_cooldowns.pop(item.id, None)
 
         yield item
 
