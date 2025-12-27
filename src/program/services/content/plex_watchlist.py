@@ -268,14 +268,16 @@ class PlexWatchlist:
         logger.debug(f"W2P request headers: {headers}")
 
         # Calculate timeout for single item (since we process one at a time now)
-        # Each item can take 60-180 seconds (especially shows with multiple seasons and Instant RD button clicks)
+        # Each item can take 60-600 seconds (especially shows with many seasons, Instant RD button clicks, and network idle waits)
+        # W2P processes each season sequentially, and each season can take 40-60 seconds for network idle alone
+        # Shows with 5+ seasons can easily take 5-10 minutes
         # Add buffer for network monitoring and processing
         # Since we process items one at a time, we only need timeout for a single item
         base_timeout = 60.0  # Base timeout for connection and initial processing
-        timeout_per_item = 180.0  # Additional seconds per item (increased for shows with many seasons and button clicks)
+        timeout_per_item = 600.0  # Additional seconds per item (increased for shows with many seasons - up to 10 minutes)
         total_timeout = base_timeout + timeout_per_item
-        # Cap at 10 minutes (600 seconds) per item to allow for very large shows with many seasons
-        total_timeout = min(total_timeout, 600.0)
+        # Cap at 15 minutes (900 seconds) per item to allow for very large shows with many seasons
+        total_timeout = min(total_timeout, 900.0)
         
         logger.info(f"W2P timeout set to {total_timeout:.0f}s for 1 item")
         

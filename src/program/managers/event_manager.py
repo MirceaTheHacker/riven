@@ -223,7 +223,21 @@ class EventManager:
             program (Program): The program containing the service.
             item (Event, optional): The event item to process. Defaults to None.
         """
-        log_message = f"Submitting service {service.__name__} to be executed"
+        service_name = service.__name__
+        
+        # Check if there's already a running job for this service
+        # This prevents the scheduler from submitting duplicate jobs while one is already running
+        # The executor has max_workers=1, so we check if any future for this service is not done
+        with self.mutex:
+            running_futures = [f for f in self._futures 
+                             if not f.done() 
+                             and hasattr(f, 'service_name') 
+                             and f.service_name == service_name]
+            if running_futures:
+                logger.debug(f"⏭️  Skipping {service_name} - already running ({len(running_futures)} active future(s))")
+                return
+        
+        log_message = f"Submitting service {service_name} to be executed"
         # Content services dont provide an event.
         if event:
             log_message += f" with {event.log_message}"
@@ -240,9 +254,11 @@ class EventManager:
             cancellation_event,
         )
         future.cancellation_event = cancellation_event
+        future.service_name = service_name  # Track which service this future belongs to
         if event:
             future.event = event
-        self._futures.append(future)
+        with self.mutex:
+            self._futures.append(future)
         sse_manager.publish_event("event_update", json.dumps(self.get_event_updates()))
         future.add_done_callback(lambda f: self._process_future(f, service))
 
