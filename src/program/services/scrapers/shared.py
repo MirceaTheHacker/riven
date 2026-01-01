@@ -321,7 +321,8 @@ def _parse_results(
                 if item.type == "season" and hasattr(item, "number"):
                     target_season = item.number
                 
-                # Sort by: 1) matching season releases first, 2) single-season releases (any season), 3) size (larger first), 4) RTN rank
+                # Sort by: 1) matching season releases first, 2) single-season releases (any season), 3) size (larger first, heavily weighted), 4) RTN rank
+                # For HQ profile, size should be the dominant factor after season matching
                 def sort_key(torrent: Torrent) -> tuple:
                     infohash_lower = torrent.infohash.lower()
                     # Get season from W2P releases
@@ -333,8 +334,13 @@ def _parse_results(
                     matches_target_season = 1 if (target_season is not None and season == target_season) else 0
                     # Get size from W2P releases if available, otherwise use 0
                     size_bytes = size_map.get(infohash_lower, 0)
-                    # Sort: matching season first, then single-season, then by size, then by rank
-                    return (-matches_target_season, -is_single_season, -size_bytes, -getattr(torrent, 'rank', 0))
+                    # Normalize size to GB and multiply by large factor to give it dominant weight
+                    # This ensures 100GB files rank much higher than 20GB files, even if RTN rank differs
+                    # Size in GB * 1000 gives us a score where 100GB = 100000, 20GB = 20000
+                    # This is much larger than typical RTN ranks (usually 0-100), ensuring size dominates
+                    size_score = (size_bytes / 1_000_000_000) * 1000  # Convert bytes to GB, then multiply by 1000
+                    # Sort: matching season first, then single-season, then by size (heavily weighted), then by rank
+                    return (-matches_target_season, -is_single_season, -size_score, -getattr(torrent, 'rank', 0))
                 
                 torrent_list.sort(key=sort_key)
                 

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from program.db import db_functions
 from program.db.db import db, vacuum_and_analyze_index_maintenance
-from program.media.item import Episode, Movie, Show
+from program.media.item import Episode, Movie, Season, Show
 from program.media.state import States
 from program.scheduling.models import ScheduledStatus, ScheduledTask
 from program.services.indexers import IndexerService
@@ -382,7 +382,9 @@ class ProgramScheduler:
                     logger.debug(f"Skipping schedule for {mv.log_string}: {e}")
 
     def _schedule_ongoing_shows(self, session: Session, now: datetime) -> None:
-        """Schedule reindex_show for ongoing/unreleased shows based on next air, with daily fallback."""
+        """Schedule reindex_show for ongoing/unreleased shows based on next air, with daily fallback.
+        Also schedules periodic reindexes for shows with episodes (even if completed) to discover new episodes."""
+        # First, handle ongoing/unreleased shows with next air dates
         ongoing_shows = (
             session.execute(
                 select(Show).where(
@@ -423,6 +425,64 @@ class ProgramScheduler:
                         logger.debug(
                             f"Skipping fallback reindex for {show.log_string}: {e}"
                         )
+        
+        # Also schedule periodic reindexes for shows with episodes (even if completed)
+        # This ensures we discover new episodes that are released after the show was marked as completed
+        # Check weekly for shows that have episodes but might have more
+        from sqlalchemy.orm import joinedload
+        
+        # Get all shows and load their seasons/episodes relationships
+        # We'll filter in Python to find shows with episodes
+        all_shows = (
+            session.execute(
+                select(Show)
+                .options(joinedload(Show.seasons).joinedload(Season.episodes))
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+        
+        # Filter to shows that have at least one episode
+        shows_with_episodes = [
+            show for show in all_shows
+            if any(
+                season.episodes and len(season.episodes) > 0
+                for season in show.seasons
+            )
+        ]
+        
+        # Schedule weekly reindex for shows that have episodes but aren't already scheduled
+        # Skip shows that are already in Ongoing/Unreleased (handled above) or already have a future task
+        weekly_fallback_time = (now + timedelta(days=7)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        for show in shows_with_episodes:
+            # Skip if already handled above (ongoing/unreleased) or already has a future task
+            if show.last_state in [States.Ongoing, States.Unreleased]:
+                continue
+            if self._has_future_task(session, show.id, "reindex_show", now):
+                continue
+            
+            # Verify the show actually has episodes (double-check after loading)
+            has_episodes = any(
+                season.episodes and len(season.episodes) > 0
+                for season in show.seasons
+            )
+            if has_episodes:
+                try:
+                    show.schedule(
+                        weekly_fallback_time,
+                        task_type="reindex_show",
+                        reason="monitor:weekly_episode_check",
+                    )
+                    logger.debug(
+                        f"Scheduled weekly reindex for {show.log_string} to discover new episodes"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Skipping weekly reindex for {show.log_string}: {e}"
+                    )
 
     def _schedule_unknown_movies(self, session: Session, now: datetime) -> None:
         """Schedule daily reindex for movies without any known release date."""
